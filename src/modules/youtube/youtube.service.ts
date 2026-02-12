@@ -1,4 +1,5 @@
 import { BadRequestException, Injectable, OnModuleInit } from '@nestjs/common';
+import pLimit from 'p-limit';
 import { fetchTranscript } from 'youtube-transcript-plus';
 import { Innertube } from 'youtubei.js';
 
@@ -53,32 +54,44 @@ export class YoutubeService implements OnModuleInit {
 
   /* ---------------- GET SINGLE TRANSCRIPT ---------------- */
   async getTranscript(videoId: string, preferredLang = 'en') {
-    try {
-      const info = await this.youtube.getInfo(videoId);
-      const metadata = this.buildMetadata(info, videoId);
+    const maxRetries = 10;
+    let lastError: any;
 
-      const { transcript, usedLang } = await this.fetchTranscriptWithFallback(
-        videoId,
-        preferredLang,
-      );
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        const info = await this.youtube.getInfo(videoId);
+        const metadata = this.buildMetadata(info, videoId);
 
-      return {
-        success: !!transcript,
-        videoId,
-        transcript,
-        transcriptLanguage: usedLang,
-        metadata,
-      };
-    } catch (error) {
-      return {
-        success: false,
-        videoId,
-        transcript: null,
-        transcriptLanguage: null,
-        metadata: null,
-        error: error.message,
-      };
+        const { transcript, usedLang } = await this.fetchTranscriptWithFallback(
+          videoId,
+          preferredLang,
+        );
+
+        return {
+          success: !!transcript,
+          videoId,
+          transcript,
+          transcriptLanguage: usedLang,
+          metadata,
+          attempts: attempt,
+        };
+      } catch (error) {
+        lastError = error;
+        if (attempt < maxRetries) {
+          await new Promise((resolve) => setTimeout(resolve, 1000 * attempt));
+        }
+      }
     }
+
+    return {
+      success: false,
+      videoId,
+      transcript: null,
+      transcriptLanguage: null,
+      metadata: null,
+      error: lastError?.message || 'Unknown error',
+      attempts: maxRetries,
+    };
   }
 
   /* ---------------- METADATA ONLY ---------------- */
@@ -96,9 +109,16 @@ export class YoutubeService implements OnModuleInit {
   }
 
   /* ---------------- BATCH TRANSCRIPTS ---------------- */
-  async getTranscripts(videoIds: string[], preferredLang = 'vi') {
-    return Promise.all(
-      videoIds.map((id) => this.getTranscript(id, preferredLang)),
-    );
-  }
+ async getTranscripts(videoIds: string[], preferredLang = 'en') {
+  const concurrency = 15; // số request chạy song song
+  const limit = pLimit(concurrency);
+
+  const tasks = videoIds.map((videoId) =>
+    limit(() => this.getTranscript(videoId, preferredLang)),
+  );
+
+  const results = await Promise.all(tasks);
+
+  return results;
+}
 }
