@@ -1,7 +1,7 @@
 import { BadRequestException, Injectable, OnModuleInit } from '@nestjs/common';
 import { Response } from 'express';
 import pLimit from 'p-limit';
-import * as youtubeDl from 'youtube-dl-exec';
+import { exec as youtubeDlExec } from 'youtube-dl-exec';
 import { fetchTranscript } from 'youtube-transcript-plus';
 import { Innertube } from 'youtubei.js';
 
@@ -150,7 +150,7 @@ export class YoutubeService implements OnModuleInit {
         `attachment; filename="${filename}"`,
       );
 
-      const subprocess = youtubeDl.exec(url, {
+      const subprocess = youtubeDlExec(url, {
         extractAudio: true,
         audioFormat: 'mp3',
         output: '-',
@@ -171,4 +171,38 @@ export class YoutubeService implements OnModuleInit {
       throw new BadRequestException(`Error streaming audio: ${error.message}`);
     }
   }
+
+
+ async getChannelVideos(url: string) {
+  try {
+    const result = await youtubeDlExec(url + '/videos', {
+      dumpSingleJson: true,
+      flatPlaylist: true,
+    }) as any;
+
+    console.log('Result:', JSON.stringify(result, null, 2));
+
+    if (!result) {
+      throw new BadRequestException('No data returned from youtube-dl');
+    }
+
+    // Check if result is the entries array itself
+
+  
+
+    return  JSON.parse(result.stdout).entries.map((item:any)=>({
+      id: item?.id,
+      url: item?.url,
+      title: item?.title,
+      description: item?.description ,
+      duration: item?.duration,
+      view_count: item?.view_count
+    }));
+  } catch (error) {
+    throw new BadRequestException(
+      `Error fetching channel videos: ${error.message}`,
+    );
+  }
+}
+  
 }

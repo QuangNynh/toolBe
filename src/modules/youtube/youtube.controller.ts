@@ -1,4 +1,4 @@
-import { Body, Controller, Post, Res } from '@nestjs/common';
+import { Body, Controller, Get, Post, Res } from '@nestjs/common';
 import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { Response } from 'express';
 import { GetTranscriptDto } from './dto/getTranscript.dto';
@@ -37,5 +37,16 @@ export class YoutubeController {
   })
   async streamAudio(@Body() dto: StreamAudioDto, @Res() res: Response) {
     return this.ytService.streamAudio(dto.url, res);
+  }
+
+  
+  @Post('/urls')
+  @ApiOperation({ summary: 'Lấy danh sách video từ kênh YouTube' })
+  @ApiResponse({
+    status: 200,
+    description: 'Danh sách video của kênh',
+  })
+  async getChannelVideos(@Body() dto: StreamAudioDto) {
+    return this.ytService.getChannelVideos(dto.url);
   }
 }
