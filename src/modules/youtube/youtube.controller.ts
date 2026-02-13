@@ -1,8 +1,10 @@
-import { Body, Controller, Post } from '@nestjs/common';
+import { Body, Controller, Post, Res } from '@nestjs/common';
 import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
+import { Response } from 'express';
 import { GetTranscriptDto } from './dto/getTranscript.dto';
 import { GetTranscriptsDto } from './dto/getTranscripts.dto';
 import { GetAllTranscriptDto } from './dto/getAllTranscript.dto';
+import { StreamAudioDto } from './dto/streamAudio.dto';
 import { YoutubeService } from './youtube.service';
 
 @ApiTags('Youtube')
@@ -25,5 +27,15 @@ export class YoutubeController {
   })
   getTranscripts(@Body() dto: GetTranscriptsDto) {
     return this.ytService.getTranscripts(dto.videoIds);
+  }
+
+  @Post('/audio')
+  @ApiOperation({ summary: 'Stream audio từ video YouTube' })
+  @ApiResponse({
+    status: 200,
+    description: 'Audio stream của video',
+  })
+  async streamAudio(@Body() dto: StreamAudioDto, @Res() res: Response) {
+    return this.ytService.streamAudio(dto.url, res);
   }
 }

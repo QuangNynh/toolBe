@@ -1,5 +1,7 @@
 import { BadRequestException, Injectable, OnModuleInit } from '@nestjs/common';
+import { Response } from 'express';
 import pLimit from 'p-limit';
+import * as youtubeDl from 'youtube-dl-exec';
 import { fetchTranscript } from 'youtube-transcript-plus';
 import { Innertube } from 'youtubei.js';
 
@@ -109,16 +111,64 @@ export class YoutubeService implements OnModuleInit {
   }
 
   /* ---------------- BATCH TRANSCRIPTS ---------------- */
- async getTranscripts(videoIds: string[], preferredLang = 'en') {
-  const concurrency = 15; // số request chạy song song
-  const limit = pLimit(concurrency);
+  async getTranscripts(videoIds: string[], preferredLang = 'en') {
+    const concurrency = 15; // số request chạy song song
+    const limit = pLimit(concurrency);
 
-  const tasks = videoIds.map((videoId) =>
-    limit(() => this.getTranscript(videoId, preferredLang)),
-  );
+    const tasks = videoIds.map((videoId) =>
+      limit(() => this.getTranscript(videoId, preferredLang)),
+    );
 
-  const results = await Promise.all(tasks);
+    const results = await Promise.all(tasks);
 
-  return results;
-}
+    return results;
+  }
+  async streamAudio(url: string, res: Response) {
+    try {
+      // Extract video ID to get metadata
+      let videoId: string;
+      if (url.includes('v=')) {
+        videoId = url.split('v=')[1].split('&')[0];
+      } else {
+        const parts = url.split('/');
+        videoId = parts[parts.length - 1] || '';
+      }
+
+      let filename = 'audio.mp3';
+      if (videoId) {
+        try {
+          const info = await this.youtube.getInfo(videoId);
+          filename = `${info.basic_info.title}.mp3`;
+        } catch {
+          // If can't get info, use default filename
+        }
+      }
+
+      res.setHeader('Content-Type', 'audio/mpeg');
+      res.setHeader(
+        'Content-Disposition',
+        `attachment; filename="${filename}"`,
+      );
+
+      const subprocess = youtubeDl.exec(url, {
+        extractAudio: true,
+        audioFormat: 'mp3',
+        output: '-',
+      });
+
+      if (!subprocess.stdout) {
+        throw new BadRequestException('Could not create audio stream');
+      }
+
+      subprocess.stdout.pipe(res);
+
+      if (subprocess.stderr) {
+        subprocess.stderr.on('data', (err) => {
+          console.error(err.toString());
+        });
+      }
+    } catch (error) {
+      throw new BadRequestException(`Error streaming audio: ${error.message}`);
+    }
+  }
 }
