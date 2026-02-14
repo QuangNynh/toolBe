@@ -5,6 +5,7 @@ import { GetTranscriptDto } from './dto/getTranscript.dto';
 import { GetTranscriptsDto } from './dto/getTranscripts.dto';
 import { GetAllTranscriptDto } from './dto/getAllTranscript.dto';
 import { StreamAudioDto } from './dto/streamAudio.dto';
+import { GetChannelVideosDto } from './dto/getChannelVideos.dto';
 import { YoutubeService } from './youtube.service';
 
 @ApiTags('Youtube')
@@ -39,14 +40,13 @@ export class YoutubeController {
     return this.ytService.streamAudio(dto.url, res);
   }
 
-  
   @Post('/urls')
   @ApiOperation({ summary: 'Lấy danh sách video từ kênh YouTube' })
   @ApiResponse({
     status: 200,
     description: 'Danh sách video của kênh',
   })
-  async getChannelVideos(@Body() dto: StreamAudioDto) {
+  async getChannelVideos(@Body() dto: GetChannelVideosDto) {
     return this.ytService.getChannelVideos(dto.url);
   }
 }

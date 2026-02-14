@@ -175,20 +175,15 @@ export class YoutubeService implements OnModuleInit {
 
  async getChannelVideos(url: string) {
   try {
-    const result = await youtubeDlExec(url + '/videos', {
+    const result = await youtubeDlExec(url , {
       dumpSingleJson: true,
       flatPlaylist: true,
     }) as any;
 
-    console.log('Result:', JSON.stringify(result, null, 2));
 
     if (!result) {
       throw new BadRequestException('No data returned from youtube-dl');
     }
-
-    // Check if result is the entries array itself
-
-  
 
     return  JSON.parse(result.stdout).entries.map((item:any)=>({
       id: item?.id,
