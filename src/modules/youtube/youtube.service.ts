@@ -4,6 +4,7 @@ import pLimit from 'p-limit';
 import { exec as youtubeDlExec } from 'youtube-dl-exec';
 import { fetchTranscript } from 'youtube-transcript-plus';
 import { Innertube } from 'youtubei.js';
+import axios from 'axios';
 
 @Injectable()
 export class YoutubeService implements OnModuleInit {
@@ -199,5 +200,32 @@ export class YoutubeService implements OnModuleInit {
     );
   }
 }
+
+  /* ---------------- DOWNLOAD IMAGE ---------------- */
+  async downloadImage(imageUrl: string, res: Response) {
+    try {
+      const response = await axios.get(imageUrl, {
+        responseType: 'stream',
+        timeout: 30000,
+      });
+
+      const contentType = response.headers['content-type'] || 'image/jpeg';
+      const extension = contentType.split('/')[1] || 'jpg';
+      
+      // Extract filename from URL or use default
+      const urlParts = imageUrl.split('/');
+      const urlFilename = urlParts[urlParts.length - 1].split('?')[0];
+      const filename = urlFilename || `image.${extension}`;
+
+      res.setHeader('Content-Type', contentType);
+      res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+
+      response.data.pipe(res);
+    } catch (error) {
+      throw new BadRequestException(
+        `Error downloading image: ${error.message}`,
+      );
+    }
+  }
   
 }

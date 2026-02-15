@@ -6,6 +6,7 @@ import { GetTranscriptsDto } from './dto/getTranscripts.dto';
 import { GetAllTranscriptDto } from './dto/getAllTranscript.dto';
 import { StreamAudioDto } from './dto/streamAudio.dto';
 import { GetChannelVideosDto } from './dto/getChannelVideos.dto';
+import { DownloadImageDto } from './dto/downloadImage.dto';
 import { YoutubeService } from './youtube.service';
 
 @ApiTags('Youtube')
@@ -48,5 +49,15 @@ export class YoutubeController {
   })
   async getChannelVideos(@Body() dto: GetChannelVideosDto) {
     return this.ytService.getChannelVideos(dto.url);
+  }
+
+  @Post('/download-image')
+  @ApiOperation({ summary: 'Tải xuống ảnh từ URL' })
+  @ApiResponse({
+    status: 200,
+    description: 'Stream ảnh để tải xuống',
+  })
+  async downloadImage(@Body() dto: DownloadImageDto, @Res() res: Response) {
+    return this.ytService.downloadImage(dto.imageUrl, res);
   }
 }
