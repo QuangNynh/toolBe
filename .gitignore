@@ -3,6 +3,13 @@
 /node_modules
 /build
 
+# Uploads
+/uploads
+*.srt
+*.wav
+*.mp3
+*.mp4
+
 # Logs
 logs
 *.log
