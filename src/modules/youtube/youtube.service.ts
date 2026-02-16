@@ -1,18 +1,17 @@
 /* eslint-disable @typescript-eslint/no-unsafe-member-access */
 import { BadRequestException, Injectable, OnModuleInit } from '@nestjs/common';
+import axios from 'axios';
+import { exec } from 'child_process';
 import { Response } from 'express';
 import pLimit from 'p-limit';
+import * as sharp from 'sharp';
+import { promisify } from 'util';
 import { exec as youtubeDlExec } from 'youtube-dl-exec';
 import { fetchTranscript } from 'youtube-transcript-plus';
 import { Innertube } from 'youtubei.js';
 import type VideoInfo from 'youtubei.js/dist/src/parser/youtube/VideoInfo';
-import axios from 'axios';
-import * as sharp from 'sharp';
-import { exec } from 'child_process';
-import { promisify } from 'util';
 
 const execPromise = promisify(exec);
-
 
 @Injectable()
 export class YoutubeService implements OnModuleInit {
@@ -53,7 +52,7 @@ export class YoutubeService implements OnModuleInit {
         const transcript = await fetchTranscript(videoId, lang ? { lang } : {});
         usedLang = lang || 'auto';
         return { transcript, usedLang };
-      } catch (err:any) {
+      } catch (err: any) {
         // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
         if (!err.message?.includes('transcript')) {
           throw err;
@@ -136,19 +135,21 @@ export class YoutubeService implements OnModuleInit {
     return results;
   }
   private sanitizeFilename(filename: string): string {
-    return filename
-      // eslint-disable-next-line no-control-regex
-      .replace(/[<>:"/\\|?*\x00-\x1f]/g, '') // Remove invalid characters
-      .replace(/[\u{1F600}-\u{1F64F}]/gu, '') // Remove emoticons
-      .replace(/[\u{1F300}-\u{1F5FF}]/gu, '') // Remove symbols & pictographs
-      .replace(/[\u{1F680}-\u{1F6FF}]/gu, '') // Remove transport & map symbols
-      .replace(/[\u{2600}-\u{26FF}]/gu, '') // Remove misc symbols
-      .replace(/[\u{2700}-\u{27BF}]/gu, '') // Remove dingbats
-      .replace(/[\u{1F900}-\u{1F9FF}]/gu, '') // Remove supplemental symbols
-      .replace(/[\u{1FA00}-\u{1FA6F}]/gu, '') // Remove extended symbols
-      .replace(/[^\x20-\x7E]/g, '') // Keep only ASCII printable characters
-      .trim()
-      .substring(0, 200) || 'audio'; // Limit length and provide fallback
+    return (
+      filename
+        // eslint-disable-next-line no-control-regex
+        .replace(/[<>:"/\\|?*\x00-\x1f]/g, '') // Remove invalid characters
+        .replace(/[\u{1F600}-\u{1F64F}]/gu, '') // Remove emoticons
+        .replace(/[\u{1F300}-\u{1F5FF}]/gu, '') // Remove symbols & pictographs
+        .replace(/[\u{1F680}-\u{1F6FF}]/gu, '') // Remove transport & map symbols
+        .replace(/[\u{2600}-\u{26FF}]/gu, '') // Remove misc symbols
+        .replace(/[\u{2700}-\u{27BF}]/gu, '') // Remove dingbats
+        .replace(/[\u{1F900}-\u{1F9FF}]/gu, '') // Remove supplemental symbols
+        .replace(/[\u{1FA00}-\u{1FA6F}]/gu, '') // Remove extended symbols
+        .replace(/[^\x20-\x7E]/g, '') // Keep only ASCII printable characters
+        .trim()
+        .substring(0, 200) || 'audio'
+    ); // Limit length and provide fallback
   }
 
   async streamAudio(url: string, res: Response) {
@@ -166,7 +167,9 @@ export class YoutubeService implements OnModuleInit {
       if (videoId) {
         try {
           const info = await this.youtube.getInfo(videoId);
-          const sanitizedTitle = this.sanitizeFilename(info.basic_info.title || 'audio');
+          const sanitizedTitle = this.sanitizeFilename(
+            info.basic_info.title || 'audio',
+          );
           filename = `${sanitizedTitle}.mp3`;
         } catch {
           // If can't get info, use default filename
@@ -201,41 +204,42 @@ export class YoutubeService implements OnModuleInit {
     }
   }
 
+  async getChannelVideos(url: string) {
+    try {
+      const result = await youtubeDlExec(url, {
+        dumpSingleJson: true,
+        flatPlaylist: true,
+      });
 
- async getChannelVideos(url: string) {
-  try {
-    const result = await youtubeDlExec(url , {
-      dumpSingleJson: true,
-      flatPlaylist: true,
-    });
+      if (!result) {
+        throw new BadRequestException('No data returned from youtube-dl');
+      }
 
-    if (!result) {
-      throw new BadRequestException('No data returned from youtube-dl');
+      const parsed = JSON.parse(result.stdout) as {
+        entries: Array<{
+          id?: string;
+          url?: string;
+          title?: string;
+          description?: string;
+          duration?: number;
+          view_count?: number;
+        }>;
+      };
+
+      return parsed.entries.map((item) => ({
+        id: item?.id,
+        url: item?.url,
+        title: item?.title,
+        description: item?.description,
+        duration: item?.duration,
+        view_count: item?.view_count,
+      }));
+    } catch (error) {
+      throw new BadRequestException(
+        `Error fetching channel videos: ${(error as Error).message}`,
+      );
     }
-
-    const parsed = JSON.parse(result.stdout) as { entries: Array<{
-      id?: string;
-      url?: string;
-      title?: string;
-      description?: string;
-      duration?: number;
-      view_count?: number;
-    }> };
-
-    return parsed.entries.map((item) => ({
-      id: item?.id,
-      url: item?.url,
-      title: item?.title,
-      description: item?.description,
-      duration: item?.duration,
-      view_count: item?.view_count
-    }));
-  } catch (error) {
-    throw new BadRequestException(
-      `Error fetching channel videos: ${(error as Error).message}`,
-    );
   }
-}
 
   /* ---------------- DOWNLOAD IMAGE ---------------- */
   async downloadImage(imageUrl: string, res: Response) {
@@ -244,14 +248,15 @@ export class YoutubeService implements OnModuleInit {
         responseType: 'arraybuffer',
         timeout: 30000,
         headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+          'User-Agent':
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
         },
         maxRedirects: 5,
         validateStatus: (status) => status >= 200 && status < 300,
       });
 
       let buffer = Buffer.from(response.data);
-      
+
       // Validate buffer is not empty
       if (buffer.length === 0) {
         throw new BadRequestException('Downloaded image is empty');
@@ -261,17 +266,31 @@ export class YoutubeService implements OnModuleInit {
       let contentType = 'image/jpeg';
       let extension = 'jpg';
       let needsConversion = false;
-      
-      if (buffer[0] === 0xFF && buffer[1] === 0xD8 && buffer[2] === 0xFF) {
+
+      if (buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) {
         contentType = 'image/jpeg';
         extension = 'jpg';
-      } else if (buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4E && buffer[3] === 0x47) {
+      } else if (
+        buffer[0] === 0x89 &&
+        buffer[1] === 0x50 &&
+        buffer[2] === 0x4e &&
+        buffer[3] === 0x47
+      ) {
         contentType = 'image/png';
         extension = 'png';
-      } else if (buffer[0] === 0x47 && buffer[1] === 0x49 && buffer[2] === 0x46) {
+      } else if (
+        buffer[0] === 0x47 &&
+        buffer[1] === 0x49 &&
+        buffer[2] === 0x46
+      ) {
         contentType = 'image/gif';
         extension = 'gif';
-      } else if (buffer[0] === 0x52 && buffer[1] === 0x49 && buffer[2] === 0x46 && buffer[3] === 0x46) {
+      } else if (
+        buffer[0] === 0x52 &&
+        buffer[1] === 0x49 &&
+        buffer[2] === 0x46 &&
+        buffer[3] === 0x46
+      ) {
         // WebP detected - convert to JPG for Canva compatibility
         needsConversion = true;
         contentType = 'image/jpeg';
@@ -281,22 +300,27 @@ export class YoutubeService implements OnModuleInit {
       // Convert WebP to JPG if needed
       if (needsConversion) {
         console.log('Converting WebP to JPG for Canva compatibility...');
-        buffer = await sharp(buffer)
-          .jpeg({ quality: 95 })
-          .toBuffer();
+        buffer = await sharp(buffer).jpeg({ quality: 95 }).toBuffer();
       }
-      
+
       // Extract filename from URL
       const urlParts = imageUrl.split('/');
-      const urlFilename = urlParts[urlParts.length - 1].split('?')[0].split('.')[0];
+      const urlFilename = urlParts[urlParts.length - 1]
+        .split('?')[0]
+        .split('.')[0];
       const sanitizedFilename = this.sanitizeFilename(urlFilename || 'image');
       const filename = `${sanitizedFilename}.${extension}`;
 
-      console.log(`Downloading image: ${filename}, size: ${buffer.length} bytes, type: ${contentType}`);
+      console.log(
+        `Downloading image: ${filename}, size: ${buffer.length} bytes, type: ${contentType}`,
+      );
 
       res.setHeader('Content-Type', contentType);
       res.setHeader('Content-Length', buffer.length.toString());
-      res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+      res.setHeader(
+        'Content-Disposition',
+        `attachment; filename="${filename}"`,
+      );
       res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
       res.setHeader('Pragma', 'no-cache');
       res.setHeader('Expires', '0');
@@ -312,9 +336,7 @@ export class YoutubeService implements OnModuleInit {
 
   async convertToWav(input: string, output: string): Promise<void> {
     try {
-      await execPromise(
-        `ffmpeg -i "${input}" -ar 16000 -ac 1 "${output}" -y`
-      );
+      await execPromise(`ffmpeg -i "${input}" -ar 16000 -ac 1 "${output}" -y`);
     } catch (error) {
       throw new BadRequestException(
         `Error converting to WAV: ${(error as Error).message}`,
@@ -323,61 +345,71 @@ export class YoutubeService implements OnModuleInit {
   }
 
   async audioToSrt(audioPath: string): Promise<string> {
-    try {
-      const path = await import('path');
-      const fs = await import('fs');
-      
-      const wavPath = audioPath.replace(/\.\w+$/, '.wav');
-      const audioDir = path.dirname(audioPath);
-      const audioBasename = path.basename(wavPath, '.wav');
+    const path = await import('path');
+    const fs = await import('fs/promises');
 
+    const wavPath = audioPath.replace(/\.\w+$/, '.wav');
+    const audioDir = path.dirname(audioPath);
+    const audioBasename = path.basename(wavPath, '.wav');
+    const srtPath = path.join(audioDir, `${audioBasename}.srt`);
+
+    try {
+      // Convert audio -> wav (chuẩn whisper)
       await this.convertToWav(audioPath, wavPath);
 
-      // Whisper creates the SRT file in the same directory as the input file
-      // with the same basename
+      // Run whisper
       await execPromise(
-        `whisper "${wavPath}" --model base --output_format srt --output_dir "${audioDir}"`
+        `whisper "${wavPath}" --model tiny --output_format srt --output_dir "${audioDir}" --fp16 False`,
       );
 
-      // The SRT file will be created with the same name as the wav file
-      const srtPath = path.join(audioDir, `${audioBasename}.srt`);
+      // Check file tồn tại
+      await fs.access(srtPath);
 
-      // Check if file was created
-      if (!fs.existsSync(srtPath)) {
-        throw new Error(`SRT file not created at expected path: ${srtPath}`);
-      }
-
-      // Read SRT content
-      const srtContent = fs.readFileSync(srtPath, 'utf-8');
-
-      // Clean up all files immediately after reading
-      try {
-        if (fs.existsSync(srtPath)) fs.unlinkSync(srtPath);
-        if (fs.existsSync(wavPath)) fs.unlinkSync(wavPath);
-        if (fs.existsSync(audioPath)) fs.unlinkSync(audioPath);
-      } catch (cleanupError) {
-        console.error('Error cleaning up files:', cleanupError);
-      }
+      // Read async (nhanh hơn sync khi concurrent nhiều request)
+      const srtContent = await fs.readFile(srtPath, 'utf-8');
 
       return srtContent;
     } catch (error) {
       throw new BadRequestException(
-        `Error converting audio to SRT: ${(error as Error).message}`,
+        `Audio → SRT error: ${(error as Error).message}`,
       );
+    } finally {
+      // Cleanup luôn (kể cả lỗi)
+      try {
+        await Promise.allSettled([
+          fs.unlink(srtPath),
+          fs.unlink(wavPath),
+          fs.unlink(audioPath),
+        ]);
+      } catch (cleanupError) {
+        console.error('Cleanup error:', cleanupError);
+      }
     }
   }
 
-  async downloadSrtFile(srtContent: string, originalFilename: string, res: Response): Promise<void> {
+  downloadSrtFile(
+    srtContent: string,
+    originalFilename: string,
+    res: Response,
+  ): void {
     try {
-      const path = await import('path');
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-require-imports
+      const { basename, extname } = require('path');
 
       // Generate filename from original audio filename
-      const baseFilename = path.basename(originalFilename, path.extname(originalFilename));
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
+      const baseFilename = basename(
+        originalFilename,
+        extname(originalFilename),
+      );
       const srtFilename = `${baseFilename}.srt`;
 
       // Set headers for download
       res.setHeader('Content-Type', 'text/plain; charset=utf-8');
-      res.setHeader('Content-Disposition', `attachment; filename="${srtFilename}"`);
+      res.setHeader(
+        'Content-Disposition',
+        `attachment; filename="${srtFilename}"`,
+      );
       res.setHeader('Content-Length', Buffer.byteLength(srtContent, 'utf-8'));
 
       // Send the file content directly
@@ -388,5 +420,4 @@ export class YoutubeService implements OnModuleInit {
       );
     }
   }
-  
 }

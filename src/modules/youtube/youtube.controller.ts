@@ -1,6 +1,19 @@
-import { Body, Controller, Post, Res, UploadedFile, UseInterceptors } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Post,
+  Res,
+  UploadedFile,
+  UseInterceptors,
+} from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
-import { ApiBody, ApiConsumes, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
+import {
+  ApiBody,
+  ApiConsumes,
+  ApiOperation,
+  ApiResponse,
+  ApiTags,
+} from '@nestjs/swagger';
 import { Response } from 'express';
 import { diskStorage } from 'multer';
 import { extname } from 'path';
@@ -39,7 +52,10 @@ export class YoutubeController {
     status: 200,
     description: 'Audio stream của video',
   })
-  async streamAudio(@Body() dto: StreamAudioDto, @Res({ passthrough: false }) res: Response) {
+  async streamAudio(
+    @Body() dto: StreamAudioDto,
+    @Res({ passthrough: false }) res: Response,
+  ) {
     return this.ytService.streamAudio(dto.url, res);
   }
 
@@ -59,11 +75,14 @@ export class YoutubeController {
     status: 200,
     description: 'Stream ảnh để tải xuống',
   })
-  async downloadImage(@Body() dto: DownloadImageDto, @Res({ passthrough: false }) res: Response) {
+  async downloadImage(
+    @Body() dto: DownloadImageDto,
+    @Res({ passthrough: false }) res: Response,
+  ) {
     return this.ytService.downloadImage(dto.imageUrl, res);
   }
 
- @Post('srt')
+  @Post('srt')
   @ApiOperation({ summary: 'Chuyển đổi file audio thành file SRT subtitle' })
   @ApiConsumes('multipart/form-data')
   @ApiBody({
@@ -105,7 +124,7 @@ export class YoutubeController {
     }
     // eslint-disable-next-line @typescript-eslint/no-unsafe-argument, @typescript-eslint/no-unsafe-member-access
     const srtContent = await this.ytService.audioToSrt(file.path);
-
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-argument, @typescript-eslint/no-unsafe-member-access
     return this.ytService.downloadSrtFile(srtContent, file.originalname, res);
   }
 }
