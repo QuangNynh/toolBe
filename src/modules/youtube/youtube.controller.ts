@@ -1,12 +1,14 @@
-import { Body, Controller, Get, Post, Res } from '@nestjs/common';
-import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
+import { Body, Controller, Post, Res, UploadedFile, UseInterceptors } from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
+import { ApiBody, ApiConsumes, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { Response } from 'express';
+import { diskStorage } from 'multer';
+import { extname } from 'path';
+import { DownloadImageDto } from './dto/downloadImage.dto';
+import { GetChannelVideosDto } from './dto/getChannelVideos.dto';
 import { GetTranscriptDto } from './dto/getTranscript.dto';
 import { GetTranscriptsDto } from './dto/getTranscripts.dto';
-import { GetAllTranscriptDto } from './dto/getAllTranscript.dto';
 import { StreamAudioDto } from './dto/streamAudio.dto';
-import { GetChannelVideosDto } from './dto/getChannelVideos.dto';
-import { DownloadImageDto } from './dto/downloadImage.dto';
 import { YoutubeService } from './youtube.service';
 
 @ApiTags('Youtube')
@@ -59,5 +61,51 @@ export class YoutubeController {
   })
   async downloadImage(@Body() dto: DownloadImageDto, @Res({ passthrough: false }) res: Response) {
     return this.ytService.downloadImage(dto.imageUrl, res);
+  }
+
+ @Post('srt')
+  @ApiOperation({ summary: 'Chuyển đổi file audio thành file SRT subtitle' })
+  @ApiConsumes('multipart/form-data')
+  @ApiBody({
+    schema: {
+      type: 'object',
+      properties: {
+        file: {
+          type: 'string',
+          format: 'binary',
+          description: 'Audio file (mp3, wav, m4a, etc.)',
+        },
+      },
+    },
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'File SRT được download tự động',
+  })
+  @UseInterceptors(
+    FileInterceptor('file', {
+      storage: diskStorage({
+        destination: './uploads',
+        filename: (_req, file, cb) => {
+          const randomName = Array(32)
+            .fill(null)
+            .map(() => Math.round(Math.random() * 16).toString(16))
+            .join('');
+          cb(null, `${randomName}${extname(file.originalname)}`);
+        },
+      }),
+    }),
+  )
+  async uploadAudio(
+    @UploadedFile() file: Express.Multer.File,
+    @Res({ passthrough: false }) res: Response,
+  ) {
+    if (!file) {
+      throw new Error('No file uploaded');
+    }
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-argument, @typescript-eslint/no-unsafe-member-access
+    const srtPath = await this.ytService.audioToSrt(file.path);
+
+    return this.ytService.downloadSrtFile(srtPath, file.originalname, res);
   }
 }

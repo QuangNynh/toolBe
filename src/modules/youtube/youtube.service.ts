@@ -1,11 +1,18 @@
+/* eslint-disable @typescript-eslint/no-unsafe-member-access */
 import { BadRequestException, Injectable, OnModuleInit } from '@nestjs/common';
 import { Response } from 'express';
 import pLimit from 'p-limit';
 import { exec as youtubeDlExec } from 'youtube-dl-exec';
 import { fetchTranscript } from 'youtube-transcript-plus';
 import { Innertube } from 'youtubei.js';
+import type VideoInfo from 'youtubei.js/dist/src/parser/youtube/VideoInfo';
 import axios from 'axios';
 import * as sharp from 'sharp';
+import { exec } from 'child_process';
+import { promisify } from 'util';
+
+const execPromise = promisify(exec);
+
 
 @Injectable()
 export class YoutubeService implements OnModuleInit {
@@ -16,7 +23,7 @@ export class YoutubeService implements OnModuleInit {
   }
 
   /* ---------------- METADATA BUILDER ---------------- */
-  private buildMetadata(info: any, videoId: string) {
+  private buildMetadata(info: VideoInfo, videoId: string) {
     return {
       videoId,
       title: info.basic_info.title,
@@ -46,7 +53,8 @@ export class YoutubeService implements OnModuleInit {
         const transcript = await fetchTranscript(videoId, lang ? { lang } : {});
         usedLang = lang || 'auto';
         return { transcript, usedLang };
-      } catch (err) {
+      } catch (err:any) {
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
         if (!err.message?.includes('transcript')) {
           throw err;
         }
@@ -80,6 +88,7 @@ export class YoutubeService implements OnModuleInit {
           attempts: attempt,
         };
       } catch (error) {
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
         lastError = error;
         if (attempt < maxRetries) {
           await new Promise((resolve) => setTimeout(resolve, 1000 * attempt));
@@ -93,6 +102,7 @@ export class YoutubeService implements OnModuleInit {
       transcript: null,
       transcriptLanguage: null,
       metadata: null,
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
       error: lastError?.message || 'Unknown error',
       attempts: maxRetries,
     };
@@ -127,6 +137,7 @@ export class YoutubeService implements OnModuleInit {
   }
   private sanitizeFilename(filename: string): string {
     return filename
+      // eslint-disable-next-line no-control-regex
       .replace(/[<>:"/\\|?*\x00-\x1f]/g, '') // Remove invalid characters
       .replace(/[\u{1F600}-\u{1F64F}]/gu, '') // Remove emoticons
       .replace(/[\u{1F300}-\u{1F5FF}]/gu, '') // Remove symbols & pictographs
@@ -196,24 +207,32 @@ export class YoutubeService implements OnModuleInit {
     const result = await youtubeDlExec(url , {
       dumpSingleJson: true,
       flatPlaylist: true,
-    }) as any;
-
+    });
 
     if (!result) {
       throw new BadRequestException('No data returned from youtube-dl');
     }
 
-    return  JSON.parse(result.stdout).entries.map((item:any)=>({
+    const parsed = JSON.parse(result.stdout) as { entries: Array<{
+      id?: string;
+      url?: string;
+      title?: string;
+      description?: string;
+      duration?: number;
+      view_count?: number;
+    }> };
+
+    return parsed.entries.map((item) => ({
       id: item?.id,
       url: item?.url,
       title: item?.title,
-      description: item?.description ,
+      description: item?.description,
       duration: item?.duration,
       view_count: item?.view_count
     }));
   } catch (error) {
     throw new BadRequestException(
-      `Error fetching channel videos: ${error.message}`,
+      `Error fetching channel videos: ${(error as Error).message}`,
     );
   }
 }
@@ -287,6 +306,110 @@ export class YoutubeService implements OnModuleInit {
       console.error('Image download error:', error);
       throw new BadRequestException(
         `Error downloading image: ${error.message}`,
+      );
+    }
+  }
+
+  async convertToWav(input: string, output: string): Promise<void> {
+    try {
+      await execPromise(
+        `ffmpeg -i "${input}" -ar 16000 -ac 1 "${output}" -y`
+      );
+    } catch (error) {
+      throw new BadRequestException(
+        `Error converting to WAV: ${(error as Error).message}`,
+      );
+    }
+  }
+
+  async audioToSrt(audioPath: string): Promise<string> {
+    try {
+      const path = await import('path');
+      const fs = await import('fs');
+      
+      const wavPath = audioPath.replace(/\.\w+$/, '.wav');
+      const audioDir = path.dirname(audioPath);
+      const audioBasename = path.basename(wavPath, '.wav');
+
+      await this.convertToWav(audioPath, wavPath);
+
+      // Whisper creates the SRT file in the same directory as the input file
+      // with the same basename
+      await execPromise(
+        `whisper "${wavPath}" --model base --output_format srt --output_dir "${audioDir}"`
+      );
+
+      // The SRT file will be created with the same name as the wav file
+      const srtPath = path.join(audioDir, `${audioBasename}.srt`);
+
+      // Check if file was created
+      if (!fs.existsSync(srtPath)) {
+        throw new Error(`SRT file not created at expected path: ${srtPath}`);
+      }
+
+      return srtPath;
+    } catch (error) {
+      throw new BadRequestException(
+        `Error converting audio to SRT: ${(error as Error).message}`,
+      );
+    }
+  }
+
+  async downloadSrtFile(srtPath: string, originalFilename: string, res: Response): Promise<void> {
+    try {
+      const fs = await import('fs');
+      const path = await import('path');
+
+      console.log('Looking for SRT file at:', srtPath);
+
+      // Check if file exists
+      if (!fs.existsSync(srtPath)) {
+        // List files in the directory to debug
+        const dir = path.dirname(srtPath);
+        const files = fs.readdirSync(dir);
+        console.log('Files in directory:', files);
+        throw new BadRequestException(`SRT file not found at: ${srtPath}`);
+      }
+
+      // Read the SRT file
+      const srtContent = fs.readFileSync(srtPath, 'utf-8');
+
+      // Generate filename from original audio filename
+      const baseFilename = path.basename(originalFilename, path.extname(originalFilename));
+      const srtFilename = `${baseFilename}.srt`;
+
+      // Set headers for download
+      res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+      res.setHeader('Content-Disposition', `attachment; filename="${srtFilename}"`);
+      res.setHeader('Content-Length', Buffer.byteLength(srtContent, 'utf-8'));
+
+      // Send the file
+      res.send(srtContent);
+
+      // Clean up files after sending
+      setTimeout(() => {
+        try {
+          const audioPath = srtPath.replace(/\.srt$/, '').replace(/\.wav$/, '');
+          const wavPath = srtPath.replace('.srt', '.wav');
+          
+          // Find and delete the original uploaded file
+          const dir = path.dirname(srtPath);
+          const files = fs.readdirSync(dir);
+          const uploadedFile = files.find(f => f.startsWith(path.basename(audioPath).split('.')[0]));
+          
+          if (fs.existsSync(srtPath)) fs.unlinkSync(srtPath);
+          if (fs.existsSync(wavPath)) fs.unlinkSync(wavPath);
+          if (uploadedFile) {
+            const uploadedFilePath = path.join(dir, uploadedFile);
+            if (fs.existsSync(uploadedFilePath)) fs.unlinkSync(uploadedFilePath);
+          }
+        } catch (cleanupError) {
+          console.error('Error cleaning up files:', cleanupError);
+        }
+      }, 1000);
+    } catch (error) {
+      throw new BadRequestException(
+        `Error downloading SRT file: ${(error as Error).message}`,
       );
     }
   }
