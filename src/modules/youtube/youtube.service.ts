@@ -5,6 +5,7 @@ import { exec as youtubeDlExec } from 'youtube-dl-exec';
 import { fetchTranscript } from 'youtube-transcript-plus';
 import { Innertube } from 'youtubei.js';
 import axios from 'axios';
+import * as sharp from 'sharp';
 
 @Injectable()
 export class YoutubeService implements OnModuleInit {
@@ -221,24 +222,69 @@ export class YoutubeService implements OnModuleInit {
   async downloadImage(imageUrl: string, res: Response) {
     try {
       const response = await axios.get(imageUrl, {
-        responseType: 'stream',
+        responseType: 'arraybuffer',
         timeout: 30000,
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        },
+        maxRedirects: 5,
+        validateStatus: (status) => status >= 200 && status < 300,
       });
 
-      const contentType = response.headers['content-type'] || 'image/jpeg';
-      const extension = contentType.split('/')[1] || 'jpg';
+      let buffer = Buffer.from(response.data);
       
-      // Extract filename from URL or use default
+      // Validate buffer is not empty
+      if (buffer.length === 0) {
+        throw new BadRequestException('Downloaded image is empty');
+      }
+
+      // Detect actual image type from buffer magic numbers
+      let contentType = 'image/jpeg';
+      let extension = 'jpg';
+      let needsConversion = false;
+      
+      if (buffer[0] === 0xFF && buffer[1] === 0xD8 && buffer[2] === 0xFF) {
+        contentType = 'image/jpeg';
+        extension = 'jpg';
+      } else if (buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4E && buffer[3] === 0x47) {
+        contentType = 'image/png';
+        extension = 'png';
+      } else if (buffer[0] === 0x47 && buffer[1] === 0x49 && buffer[2] === 0x46) {
+        contentType = 'image/gif';
+        extension = 'gif';
+      } else if (buffer[0] === 0x52 && buffer[1] === 0x49 && buffer[2] === 0x46 && buffer[3] === 0x46) {
+        // WebP detected - convert to JPG for Canva compatibility
+        needsConversion = true;
+        contentType = 'image/jpeg';
+        extension = 'jpg';
+      }
+
+      // Convert WebP to JPG if needed
+      if (needsConversion) {
+        console.log('Converting WebP to JPG for Canva compatibility...');
+        buffer = await sharp(buffer)
+          .jpeg({ quality: 95 })
+          .toBuffer();
+      }
+      
+      // Extract filename from URL
       const urlParts = imageUrl.split('/');
-      const urlFilename = urlParts[urlParts.length - 1].split('?')[0];
+      const urlFilename = urlParts[urlParts.length - 1].split('?')[0].split('.')[0];
       const sanitizedFilename = this.sanitizeFilename(urlFilename || 'image');
       const filename = `${sanitizedFilename}.${extension}`;
 
-      res.setHeader('Content-Type', contentType);
-      res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+      console.log(`Downloading image: ${filename}, size: ${buffer.length} bytes, type: ${contentType}`);
 
-      response.data.pipe(res);
+      res.setHeader('Content-Type', contentType);
+      res.setHeader('Content-Length', buffer.length.toString());
+      res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+      res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+      res.setHeader('Pragma', 'no-cache');
+      res.setHeader('Expires', '0');
+
+      res.end(buffer);
     } catch (error) {
+      console.error('Image download error:', error);
       throw new BadRequestException(
         `Error downloading image: ${error.message}`,
       );
