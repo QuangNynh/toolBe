@@ -37,7 +37,7 @@ export class YoutubeController {
     status: 200,
     description: 'Audio stream của video',
   })
-  async streamAudio(@Body() dto: StreamAudioDto, @Res() res: Response) {
+  async streamAudio(@Body() dto: StreamAudioDto, @Res({ passthrough: false }) res: Response) {
     return this.ytService.streamAudio(dto.url, res);
   }
 
@@ -57,7 +57,7 @@ export class YoutubeController {
     status: 200,
     description: 'Stream ảnh để tải xuống',
   })
-  async downloadImage(@Body() dto: DownloadImageDto, @Res() res: Response) {
+  async downloadImage(@Body() dto: DownloadImageDto, @Res({ passthrough: false }) res: Response) {
     return this.ytService.downloadImage(dto.imageUrl, res);
   }
 }

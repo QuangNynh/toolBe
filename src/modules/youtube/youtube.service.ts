@@ -124,6 +124,21 @@ export class YoutubeService implements OnModuleInit {
 
     return results;
   }
+  private sanitizeFilename(filename: string): string {
+    return filename
+      .replace(/[<>:"/\\|?*\x00-\x1f]/g, '') // Remove invalid characters
+      .replace(/[\u{1F600}-\u{1F64F}]/gu, '') // Remove emoticons
+      .replace(/[\u{1F300}-\u{1F5FF}]/gu, '') // Remove symbols & pictographs
+      .replace(/[\u{1F680}-\u{1F6FF}]/gu, '') // Remove transport & map symbols
+      .replace(/[\u{2600}-\u{26FF}]/gu, '') // Remove misc symbols
+      .replace(/[\u{2700}-\u{27BF}]/gu, '') // Remove dingbats
+      .replace(/[\u{1F900}-\u{1F9FF}]/gu, '') // Remove supplemental symbols
+      .replace(/[\u{1FA00}-\u{1FA6F}]/gu, '') // Remove extended symbols
+      .replace(/[^\x20-\x7E]/g, '') // Keep only ASCII printable characters
+      .trim()
+      .substring(0, 200) || 'audio'; // Limit length and provide fallback
+  }
+
   async streamAudio(url: string, res: Response) {
     try {
       // Extract video ID to get metadata
@@ -139,7 +154,8 @@ export class YoutubeService implements OnModuleInit {
       if (videoId) {
         try {
           const info = await this.youtube.getInfo(videoId);
-          filename = `${info.basic_info.title}.mp3`;
+          const sanitizedTitle = this.sanitizeFilename(info.basic_info.title || 'audio');
+          filename = `${sanitizedTitle}.mp3`;
         } catch {
           // If can't get info, use default filename
         }
@@ -215,7 +231,8 @@ export class YoutubeService implements OnModuleInit {
       // Extract filename from URL or use default
       const urlParts = imageUrl.split('/');
       const urlFilename = urlParts[urlParts.length - 1].split('?')[0];
-      const filename = urlFilename || `image.${extension}`;
+      const sanitizedFilename = this.sanitizeFilename(urlFilename || 'image');
+      const filename = `${sanitizedFilename}.${extension}`;
 
       res.setHeader('Content-Type', contentType);
       res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
