@@ -347,7 +347,19 @@ export class YoutubeService implements OnModuleInit {
         throw new Error(`SRT file not created at expected path: ${srtPath}`);
       }
 
-      return srtPath;
+      // Read SRT content
+      const srtContent = fs.readFileSync(srtPath, 'utf-8');
+
+      // Clean up all files immediately after reading
+      try {
+        if (fs.existsSync(srtPath)) fs.unlinkSync(srtPath);
+        if (fs.existsSync(wavPath)) fs.unlinkSync(wavPath);
+        if (fs.existsSync(audioPath)) fs.unlinkSync(audioPath);
+      } catch (cleanupError) {
+        console.error('Error cleaning up files:', cleanupError);
+      }
+
+      return srtContent;
     } catch (error) {
       throw new BadRequestException(
         `Error converting audio to SRT: ${(error as Error).message}`,
@@ -355,24 +367,9 @@ export class YoutubeService implements OnModuleInit {
     }
   }
 
-  async downloadSrtFile(srtPath: string, originalFilename: string, res: Response): Promise<void> {
+  async downloadSrtFile(srtContent: string, originalFilename: string, res: Response): Promise<void> {
     try {
-      const fs = await import('fs');
       const path = await import('path');
-
-      console.log('Looking for SRT file at:', srtPath);
-
-      // Check if file exists
-      if (!fs.existsSync(srtPath)) {
-        // List files in the directory to debug
-        const dir = path.dirname(srtPath);
-        const files = fs.readdirSync(dir);
-        console.log('Files in directory:', files);
-        throw new BadRequestException(`SRT file not found at: ${srtPath}`);
-      }
-
-      // Read the SRT file
-      const srtContent = fs.readFileSync(srtPath, 'utf-8');
 
       // Generate filename from original audio filename
       const baseFilename = path.basename(originalFilename, path.extname(originalFilename));
@@ -383,30 +380,8 @@ export class YoutubeService implements OnModuleInit {
       res.setHeader('Content-Disposition', `attachment; filename="${srtFilename}"`);
       res.setHeader('Content-Length', Buffer.byteLength(srtContent, 'utf-8'));
 
-      // Send the file
+      // Send the file content directly
       res.send(srtContent);
-
-      // Clean up files after sending
-      setTimeout(() => {
-        try {
-          const audioPath = srtPath.replace(/\.srt$/, '').replace(/\.wav$/, '');
-          const wavPath = srtPath.replace('.srt', '.wav');
-          
-          // Find and delete the original uploaded file
-          const dir = path.dirname(srtPath);
-          const files = fs.readdirSync(dir);
-          const uploadedFile = files.find(f => f.startsWith(path.basename(audioPath).split('.')[0]));
-          
-          if (fs.existsSync(srtPath)) fs.unlinkSync(srtPath);
-          if (fs.existsSync(wavPath)) fs.unlinkSync(wavPath);
-          if (uploadedFile) {
-            const uploadedFilePath = path.join(dir, uploadedFile);
-            if (fs.existsSync(uploadedFilePath)) fs.unlinkSync(uploadedFilePath);
-          }
-        } catch (cleanupError) {
-          console.error('Error cleaning up files:', cleanupError);
-        }
-      }, 1000);
     } catch (error) {
       throw new BadRequestException(
         `Error downloading SRT file: ${(error as Error).message}`,

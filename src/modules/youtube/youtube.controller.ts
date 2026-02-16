@@ -104,8 +104,8 @@ export class YoutubeController {
       throw new Error('No file uploaded');
     }
     // eslint-disable-next-line @typescript-eslint/no-unsafe-argument, @typescript-eslint/no-unsafe-member-access
-    const srtPath = await this.ytService.audioToSrt(file.path);
+    const srtContent = await this.ytService.audioToSrt(file.path);
 
-    return this.ytService.downloadSrtFile(srtPath, file.originalname, res);
+    return this.ytService.downloadSrtFile(srtContent, file.originalname, res);
   }
 }
