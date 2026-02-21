@@ -185,7 +185,13 @@ export class YoutubeService implements OnModuleInit {
       const subprocess = youtubeDlExec(url, {
         extractAudio: true,
         audioFormat: 'mp3',
+        audioQuality: 0, // best audio quality
+        format: 'bestaudio/best', // force audio-only format
         output: '-',
+        noCheckCertificates: true,
+        noWarnings: true,
+        preferFreeFormats: true,
+        addHeader: ['referer:youtube.com', 'user-agent:googlebot'],
       });
 
       if (!subprocess.stdout) {
