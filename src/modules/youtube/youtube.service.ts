@@ -3,6 +3,7 @@ import { BadRequestException, Injectable, OnModuleInit } from '@nestjs/common';
 import axios from 'axios';
 import { exec } from 'child_process';
 import { Response } from 'express';
+import { HttpsProxyAgent } from 'https-proxy-agent';
 import pLimit from 'p-limit';
 import * as sharp from 'sharp';
 import { promisify } from 'util';
@@ -10,15 +11,24 @@ import { exec as youtubeDlExec } from 'youtube-dl-exec';
 import { fetchTranscript } from 'youtube-transcript-plus';
 import { Innertube } from 'youtubei.js';
 import type VideoInfo from 'youtubei.js/dist/src/parser/youtube/VideoInfo';
+import { ProxyService } from '../proxy/proxy.service';
 
 const execPromise = promisify(exec);
 
 @Injectable()
 export class YoutubeService implements OnModuleInit {
   private youtube: Innertube;
+  private proxyAgent: HttpsProxyAgent<string>;
+
+  constructor(private readonly proxyService: ProxyService) {}
 
   async onModuleInit() {
     this.youtube = await Innertube.create();
+    this.proxyAgent = new HttpsProxyAgent(this.proxyService.getProxyUrl());
+  }
+
+  private async sleep(ms: number) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
   /* ---------------- METADATA BUILDER ---------------- */
@@ -70,6 +80,9 @@ export class YoutubeService implements OnModuleInit {
 
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
+        // Add random delay 2-6s before request
+        await this.sleep(Math.random() * 4000 + 2000);
+
         const info = await this.youtube.getInfo(videoId);
         const metadata = this.buildMetadata(info, videoId);
 
@@ -89,8 +102,16 @@ export class YoutubeService implements OnModuleInit {
       } catch (error) {
         // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
         lastError = error;
+
+        // Check for rate limiting
+        if (error?.response?.status === 429) {
+          console.log('Rate limited. Retrying after 10s...');
+          await this.sleep(10000);
+          continue;
+        }
+
         if (attempt < maxRetries) {
-          await new Promise((resolve) => setTimeout(resolve, 1000 * attempt));
+          await this.sleep(1000 * attempt);
         }
       }
     }
@@ -253,6 +274,7 @@ export class YoutubeService implements OnModuleInit {
       const response = await axios.get(imageUrl, {
         responseType: 'arraybuffer',
         timeout: 30000,
+        httpsAgent: this.proxyAgent,
         headers: {
           'User-Agent':
             'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
