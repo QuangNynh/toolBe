@@ -23,6 +23,16 @@ export class YoutubeService implements OnModuleInit {
   constructor(private readonly proxyService: ProxyService) {}
 
   async onModuleInit() {
+    // Suppress youtubei.js parsing warnings for "Remove ads" elements
+    const originalConsoleError = console.error;
+    console.error = (...args: any[]) => {
+      const message = args[0]?.toString() || '';
+      if (message.includes('ParsingError') && message.includes('Remove ads')) {
+        return; // Ignore this specific parsing error
+      }
+      originalConsoleError.apply(console, args);
+    };
+
     this.youtube = await Innertube.create();
     this.proxyAgent = new HttpsProxyAgent(this.proxyService.getProxyUrl());
   }
