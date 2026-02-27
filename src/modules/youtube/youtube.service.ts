@@ -1,9 +1,15 @@
 /* eslint-disable @typescript-eslint/no-unsafe-member-access */
+/* eslint-disable @typescript-eslint/no-unsafe-assignment */
+/* eslint-disable @typescript-eslint/no-unsafe-call */
 import { BadRequestException, Injectable, OnModuleInit } from '@nestjs/common';
 import axios from 'axios';
 import { exec } from 'child_process';
 import { Response } from 'express';
+import * as Ffmpeg from 'fluent-ffmpeg';
+import * as fs from 'fs';
 import { HttpsProxyAgent } from 'https-proxy-agent';
+import * as os from 'os';
+import * as path from 'path';
 import pLimit from 'p-limit';
 import * as sharp from 'sharp';
 import { promisify } from 'util';
@@ -25,12 +31,31 @@ export class YoutubeService implements OnModuleInit {
   async onModuleInit() {
     // Suppress youtubei.js parsing warnings for "Remove ads" elements
     const originalConsoleError = console.error;
+    const originalConsoleLog = console.log;
+
     console.error = (...args: any[]) => {
-      const message = args[0]?.toString() || '';
-      if (message.includes('ParsingError') && message.includes('Remove ads')) {
-        return; // Ignore this specific parsing error
+      const message = String(args[0] || '');
+      if (
+        message.includes('ParsingError') ||
+        message.includes('Remove ads') ||
+        message.includes(
+          'LIST_ITEM_VIEW_MODEL_ENTITY_SELECTOR_TYPE_REMOVE_ADS_AD_STATE',
+        )
+      ) {
+        return; // Ignore youtubei.js parsing errors
       }
       originalConsoleError.apply(console, args);
+    };
+
+    console.log = (...args: any[]) => {
+      const message = String(args[0] || '');
+      if (
+        message.includes('[YOUTUBEJS][Parser]') ||
+        message.includes('ParsingError')
+      ) {
+        return; // Ignore youtubei.js parser logs
+      }
+      originalConsoleLog.apply(console, args);
     };
 
     this.youtube = await Innertube.create();
@@ -238,6 +263,154 @@ export class YoutubeService implements OnModuleInit {
       }
     } catch (error) {
       throw new BadRequestException(`Error streaming audio: ${error.message}`);
+    }
+  }
+
+  async downloadProcessAndStream(
+    url: string,
+    quality: string = 'best',
+    res: Response,
+  ) {
+    let rawFile: string | null = null;
+    let finalFile: string | null = null;
+
+    try {
+      // Extract video ID to get metadata for filename
+      let videoId: string;
+      if (url.includes('v=')) {
+        videoId = url.split('v=')[1].split('&')[0];
+      } else {
+        const parts = url.split('/');
+        videoId = parts[parts.length - 1] || '';
+      }
+
+      let filename = 'video.mp4';
+      if (videoId) {
+        try {
+          const info = await this.youtube.getInfo(videoId);
+          const sanitizedTitle = this.sanitizeFilename(
+            info.basic_info.title || 'video',
+          );
+          filename = `${sanitizedTitle}.mp4`;
+        } catch {
+          // If can't get info, use default filename
+        }
+      }
+
+      // Build format string based on quality
+      let formatString: string;
+      switch (quality) {
+        case '2160p':
+        case '4k':
+          formatString = 'bestvideo[height<=2160]+bestaudio/best[height<=2160]';
+          break;
+        case '1440p':
+          formatString = 'bestvideo[height<=1440]+bestaudio/best[height<=1440]';
+          break;
+        case '1080p':
+          formatString = 'bestvideo[height<=1080]+bestaudio/best[height<=1080]';
+          break;
+        case '720p':
+          formatString = 'bestvideo[height<=720]+bestaudio/best[height<=720]';
+          break;
+        case '480p':
+          formatString = 'bestvideo[height<=480]+bestaudio/best[height<=480]';
+          break;
+        case '360p':
+          formatString = 'bestvideo[height<=360]+bestaudio/best[height<=360]';
+          break;
+        default:
+          formatString = 'bestvideo+bestaudio/best';
+      }
+
+      // Setup temp files
+      const tempDir = os.tmpdir();
+      const baseName = `yt-${Date.now()}`;
+      rawFile = path.join(tempDir, `${baseName}-raw.mp4`);
+      finalFile = path.join(tempDir, `${baseName}-final.mp4`);
+
+      console.log(`Downloading video: ${filename} with quality: ${quality}`);
+
+      // Step 1: Download video
+      await youtubeDlExec(url, {
+        format: formatString,
+        mergeOutputFormat: 'mp4',
+        output: rawFile,
+        noCheckCertificates: true,
+        noWarnings: true,
+        addHeader: ['referer:youtube.com', 'user-agent:googlebot'],
+      });
+
+      console.log(`Download complete, re-encoding for compatibility...`);
+
+      // Step 2: Re-encode with ffmpeg for CapCut/Canva compatibility
+      if (!rawFile || !finalFile) {
+        throw new BadRequestException('Temp file paths not initialized');
+      }
+
+      await new Promise<void>((resolve, reject) => {
+        Ffmpeg(rawFile as string)
+          .videoCodec('libx264')
+          .audioCodec('aac')
+          .outputOptions([
+            '-movflags +faststart', // Enable fast start
+            '-preset fast', // Fast encoding
+            '-crf 23', // Quality (lower = better, 23 is good)
+            '-pix_fmt yuv420p', // Pixel format for compatibility
+          ])
+          .save(finalFile as string)
+          .on('end', () => resolve())
+          .on('error', (err: Error) => reject(err));
+      });
+
+      // Delete raw file
+      fs.unlinkSync(rawFile);
+      rawFile = null;
+
+      console.log(`Re-encoding complete, streaming to client...`);
+
+      // Get file stats
+      const stat = fs.statSync(finalFile);
+      const fileSize = stat.size;
+
+      // Set headers for download
+      res.setHeader('Content-Type', 'video/mp4');
+      res.setHeader('Content-Length', fileSize.toString());
+      res.setHeader(
+        'Content-Disposition',
+        `attachment; filename="${filename}"`,
+      );
+      res.setHeader('Accept-Ranges', 'bytes');
+
+      // Stream the complete file
+      const stream = fs.createReadStream(finalFile);
+      stream.pipe(res);
+
+      // Cleanup after streaming completes
+      res.on('finish', () => {
+        if (finalFile) {
+          fs.unlink(finalFile, (err) => {
+            if (err) console.error('Cleanup error:', err);
+          });
+        }
+      });
+
+      // Cleanup on error
+      stream.on('error', (error) => {
+        console.error('Stream error:', error);
+        if (finalFile) {
+          fs.unlink(finalFile, () => {});
+        }
+      });
+    } catch (err: any) {
+      // Cleanup on error
+      if (rawFile && fs.existsSync(rawFile)) {
+        fs.unlinkSync(rawFile);
+      }
+      if (finalFile && fs.existsSync(finalFile)) {
+        fs.unlinkSync(finalFile);
+      }
+      throw new BadRequestException(`Video processing failed: ${err.message}`);
     }
   }
 

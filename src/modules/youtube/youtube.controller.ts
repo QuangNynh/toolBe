@@ -22,6 +22,7 @@ import { GetChannelVideosDto } from './dto/getChannelVideos.dto';
 import { GetTranscriptDto } from './dto/getTranscript.dto';
 import { GetTranscriptsDto } from './dto/getTranscripts.dto';
 import { StreamAudioDto } from './dto/streamAudio.dto';
+import { StreamVideoDto } from './dto/streamVideo.dto';
 import { YoutubeService } from './youtube.service';
 
 @ApiTags('Youtube')
@@ -57,6 +58,23 @@ export class YoutubeController {
     @Res({ passthrough: false }) res: Response,
   ) {
     return this.ytService.streamAudio(dto.url, res);
+  }
+
+  @Post('/video')
+  @ApiOperation({ summary: 'Download video YouTube với chất lượng cao nhất' })
+  @ApiResponse({
+    status: 200,
+    description: 'Video stream của video với chất lượng tốt nhất',
+  })
+  async streamVideo(
+    @Body() dto: StreamVideoDto,
+    @Res({ passthrough: false }) res: Response,
+  ) {
+    return this.ytService.downloadProcessAndStream(
+      dto.url,
+      dto.quality || 'best',
+      res,
+    );
   }
 
   @Post('/urls')
