@@ -414,36 +414,84 @@ export class YoutubeService implements OnModuleInit {
     }
   }
 
-  async getChannelVideos(url: string) {
+  async getChannelVideos(url: string, concurrency = 10) {
     try {
+      // Bước 1: flatPlaylist:true → lấy danh sách video ID rất nhanh
       const result = await youtubeDlExec(url, {
         dumpSingleJson: true,
         flatPlaylist: true,
+        noWarnings: true,
+        noCheckCertificates: true,
       });
 
       if (!result) {
         throw new BadRequestException('No data returned from youtube-dl');
       }
 
-      const parsed = JSON.parse(result.stdout) as {
-        entries: Array<{
-          id?: string;
-          url?: string;
-          title?: string;
-          description?: string;
-          duration?: number;
-          view_count?: number;
-        }>;
-      };
+      const parsed = JSON.parse(result.stdout);
+      const rawEntries: any[] = parsed.entries ?? [parsed];
 
-      return parsed.entries.map((item) => ({
-        id: item?.id,
-        url: item?.url,
-        title: item?.title,
-        description: item?.description,
-        duration: item?.duration,
-        view_count: item?.view_count,
-      }));
+      // Bước 2: batch-fetch full metadata song song qua youtubei.js
+      const limit = pLimit(concurrency);
+
+      const videos = await Promise.all(
+        rawEntries.map((entry: any) =>
+          limit(async () => {
+            const id: string = entry.id ?? entry.url?.split('v=')[1]?.split('&')[0];
+            if (!id) return null;
+
+            try {
+              const info = await this.youtube.getInfo(id);
+              const b = info.basic_info;
+              return {
+                id,
+                title: b.title ?? entry.title ?? null,
+                url: `https://www.youtube.com/watch?v=${id}`,
+                description: b.short_description ?? null,
+                duration: b.duration ?? null,
+                view_count: Number(b.view_count ?? 0),
+                like_count: Number(b.like_count ?? 0),
+                channel_id: b.channel_id ?? null,
+                channel: b.author ?? null,
+                thumbnails: b.thumbnail ?? null,
+                keywords: b.keywords ?? [],
+                is_live: b.is_live ?? false,
+                category: b.category ?? null,
+              };
+            } catch {
+              // Nếu video bị ẩn/lỗi thì trả về thông tin cơ bản từ flatPlaylist
+              return {
+                id,
+                title: entry.title ?? null,
+                url: `https://www.youtube.com/watch?v=${id}`,
+                description: null,
+                duration: entry.duration ?? null,
+                view_count: null,
+                like_count: null,
+                channel_id: null,
+                channel: entry.uploader ?? null,
+                thumbnails: null,
+                keywords: [],
+                is_live: false,
+                category: null,
+              };
+            }
+          }),
+        ),
+      );
+
+
+      const validVideos = videos.filter(Boolean);
+
+      return {
+        type: parsed.extractor_key ?? parsed._type ?? 'unknown',
+        channelId: parsed.channel_id ?? parsed.uploader_id ?? null,
+        channel: parsed.channel ?? parsed.uploader ?? null,
+        channelUrl: parsed.channel_url ?? null,
+        title: parsed.title ?? null,
+        totalVideos: validVideos.length,
+        videos: validVideos,
+      };
     } catch (error) {
       throw new BadRequestException(
         `Error fetching channel videos: ${(error as Error).message}`,
