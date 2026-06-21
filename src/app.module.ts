@@ -4,9 +4,10 @@ import { AppService } from './app.service';
 import { YouTubeModule } from './modules/youtube/youtube.module';
 import { TranslationModule } from './modules/translation/translation.module';
 import { MediaModule } from './modules/media/media.module';
+import { AudioTtsModule } from './modules/audio-tts/audio-tts.module';
 
 @Module({
-  imports: [YouTubeModule, TranslationModule, MediaModule],
+  imports: [YouTubeModule, TranslationModule, MediaModule, AudioTtsModule],
   controllers: [AppController],
   providers: [AppService],
   exports: [],
