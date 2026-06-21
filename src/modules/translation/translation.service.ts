@@ -53,9 +53,14 @@ export class TranslationService implements OnModuleInit {
 
   private readonly DEFAULT_MODEL = 'gemini-2.5-flash';
 
+  /** Max number of SRT blocks per translation request to avoid token limits */
+  private readonly SRT_CHUNK_SIZE = 50;
+
   /** Retry configuration for transient API errors (503, 429, etc.) */
-  private readonly MAX_RETRIES = 8;
-  private readonly BASE_DELAY_MS = 3000;
+  private readonly MAX_RETRIES = 5;
+  private readonly BASE_DELAY_MS = 2000;
+  /** Delay between SRT chunk requests to avoid rate limits */
+  private readonly CHUNK_DELAY_MS = 1000;
 
   private readonly SYSTEM_INSTRUCTION = [
     'You are a professional translator.',
@@ -228,8 +233,8 @@ export class TranslationService implements OnModuleInit {
 
   /**
    * Translate an SRT file content to the target language.
-   * Sends the ENTIRE SRT in a single API call to minimize request count
-   * (critical for free tier: 20 RPD / 5 RPM).
+   * Parses the SRT, splits into chunks, translates each chunk,
+   * and reassembles the SRT output.
    */
   async translateSrt(
     srtContent: string,
@@ -249,20 +254,36 @@ export class TranslationService implements OnModuleInit {
     }
 
     this.logger.log(
-      `Translating SRT: ${blocks.length} blocks to "${targetLanguage}" using ${model} (single request)`,
+      `Translating SRT: ${blocks.length} blocks to "${targetLanguage}" using ${model}`,
     );
 
-    const translatedBlocks = await this.translateAllBlocks(
-      blocks,
-      targetLanguage,
-      model,
-      client,
-    );
+    const chunks = this.chunkArray(blocks, this.SRT_CHUNK_SIZE);
+    const translatedBlocks: SrtBlock[] = [];
+
+    for (let i = 0; i < chunks.length; i++) {
+      this.logger.debug(
+        `Translating chunk ${i + 1}/${chunks.length} (${chunks[i].length} blocks)`,
+      );
+
+      // Add delay between chunks to avoid rate limiting (skip for first chunk)
+      if (i > 0) {
+        await this.delay(this.CHUNK_DELAY_MS);
+      }
+
+      const translated = await this.translateSrtChunk(
+        chunks[i],
+        targetLanguage,
+        model,
+        client,
+      );
+
+      translatedBlocks.push(...translated);
+    }
 
     const translatedSrt = this.assembleSrt(translatedBlocks);
 
     this.logger.log(
-      `SRT translation completed: ${translatedBlocks.length} blocks in 1 API call`,
+      `SRT translation completed: ${translatedBlocks.length} blocks in ${chunks.length} chunks`,
     );
 
     return {
@@ -270,7 +291,7 @@ export class TranslationService implements OnModuleInit {
       model,
       targetLanguage,
       totalBlocks: translatedBlocks.length,
-      totalChunks: 1,
+      totalChunks: chunks.length,
     };
   }
 
@@ -311,32 +332,18 @@ export class TranslationService implements OnModuleInit {
   }
 
   /**
-   * Translate ALL SRT blocks in a single API call.
-   * Sends the entire SRT content and instructs the model to return
-   * a fully translated SRT preserving structure.
+   * Translate a chunk of SRT blocks by sending only the text lines
+   * to Gemini and mapping the results back.
    */
-  private async translateAllBlocks(
+  private async translateSrtChunk(
     blocks: SrtBlock[],
     targetLanguage: string,
     model: string,
     client: GoogleGenAI,
   ): Promise<SrtBlock[]> {
-    // Build the full SRT content to send
-    const srtText = blocks
-      .map((b) => `${b.index}\n${b.timestamp}\n${b.text}`)
-      .join('\n\n');
-
-    const prompt = [
-      `Translate the following SRT subtitle file to ${targetLanguage}.`,
-      'Rules:',
-      '- Keep ALL index numbers exactly as they are.',
-      '- Keep ALL timestamps exactly as they are.',
-      '- Translate ONLY the subtitle text lines.',
-      '- Preserve the exact SRT format: index, timestamp, translated text, separated by blank lines.',
-      '- Do NOT add any extra text, explanations, or markdown formatting.',
-      '',
-      srtText,
-    ].join('\n');
+    // Extract text lines, preserving multi-line subtitles as single entries
+    const textLines = blocks.map((b) => b.text.replace(/\n/g, ' '));
+    const prompt = `Translate each of the following ${textLines.length} subtitle lines to ${targetLanguage}. Return exactly ${textLines.length} translated lines, one per line:\n\n${textLines.join('\n')}`;
 
     return this.callWithRetry<SrtBlock[]>(
       async () => {
@@ -352,31 +359,25 @@ export class TranslationService implements OnModuleInit {
         const resultText = response.text?.trim();
 
         if (!resultText) {
-          throw new Error('Gemini returned an empty response for SRT translation.');
+          throw new Error('Gemini returned an empty response for SRT chunk.');
         }
 
-        // Parse the translated SRT output back into blocks
-        const translatedBlocks = this.parseSrt(resultText);
+        const translatedLines = resultText.split('\n').filter((l) => l.trim());
 
-        if (translatedBlocks.length === 0) {
-          throw new Error('Failed to parse translated SRT output from Gemini.');
-        }
-
-        // Warn if block count doesn't match
-        if (translatedBlocks.length !== blocks.length) {
+        // If the model returned a different number of lines, try best-effort mapping
+        if (translatedLines.length !== blocks.length) {
           this.logger.warn(
-            `Block count mismatch: expected ${blocks.length}, got ${translatedBlocks.length}. Using best-effort mapping.`,
+            `Line count mismatch: expected ${blocks.length}, got ${translatedLines.length}. Using best-effort mapping.`,
           );
         }
 
-        // Map translated text back to original blocks (preserving original index/timestamp)
         return blocks.map((block, i) => ({
           index: block.index,
           timestamp: block.timestamp,
-          text: translatedBlocks[i]?.text ?? block.text,
+          text: translatedLines[i] ?? block.text, // fallback to original if missing
         }));
       },
-      'SRT translation',
+      'SRT chunk translation',
     );
   }
 
@@ -389,12 +390,24 @@ export class TranslationService implements OnModuleInit {
       .join('\n\n');
   }
 
+  /**
+   * Split an array into chunks of a given size.
+   */
+  private chunkArray<T>(array: T[], size: number): T[][] {
+    const chunks: T[][] = [];
+
+    for (let i = 0; i < array.length; i += size) {
+      chunks.push(array.slice(i, i + size));
+    }
+
+    return chunks;
+  }
+
   // ─── Retry & Rate Limit Helpers ────────────────────────────────────────
 
   /**
    * Retry a function with exponential backoff for transient API errors.
    * Retries on 503 (UNAVAILABLE), 429 (RESOURCE_EXHAUSTED), and 500 (INTERNAL).
-   * When 429 includes a retryDelay, uses that exact delay + buffer instead of backoff.
    */
   private async callWithRetry<T>(
     fn: () => Promise<T>,
@@ -420,16 +433,10 @@ export class TranslationService implements OnModuleInit {
           break;
         }
 
-        // Try to parse the exact retry delay from the API error (e.g. "retryDelay":"29s")
-        const apiDelay = this.parseRetryDelay(error);
-        const backoffDelay = this.BASE_DELAY_MS * Math.pow(2, attempt - 1);
-        // Use API-suggested delay if available (+ 2s buffer), otherwise use exponential backoff
-        const delayMs = apiDelay ? apiDelay + 2000 : backoffDelay;
-
+        const delayMs = this.BASE_DELAY_MS * Math.pow(2, attempt - 1);
         this.logger.warn(
           `${operationName} attempt ${attempt}/${this.MAX_RETRIES} failed (retryable). ` +
-            `Retrying in ${Math.round(delayMs / 1000)}s...` +
-            (apiDelay ? ` (API suggested ${Math.round(apiDelay / 1000)}s)` : ''),
+            `Retrying in ${delayMs}ms...`,
         );
 
         await this.delay(delayMs);
@@ -455,31 +462,6 @@ export class TranslationService implements OnModuleInit {
 
     const retryableCodes = ['503', '429', 'UNAVAILABLE', 'RESOURCE_EXHAUSTED'];
     return retryableCodes.some((code) => errorStr.includes(code));
-  }
-
-  /**
-   * Parse the retryDelay from a Gemini API error response.
-   * The API returns JSON like: {"details":[{"@type":"...RetryInfo","retryDelay":"29s"}]}
-   * Also handles "Please retry in 29.678142979s." in the message text.
-   * Returns delay in milliseconds, or null if not parseable.
-   */
-  private parseRetryDelay(error: unknown): number | null {
-    const errorStr =
-      error instanceof Error ? error.message : JSON.stringify(error);
-
-    // Try parsing "retryDelay":"29s" from the JSON details
-    const retryDelayMatch = errorStr.match(/"retryDelay"\s*:\s*"(\d+)s?"/);
-    if (retryDelayMatch) {
-      return parseInt(retryDelayMatch[1], 10) * 1000;
-    }
-
-    // Try parsing "Please retry in 29.678142979s." from the message
-    const retryInMatch = errorStr.match(/retry in ([\d.]+)s/i);
-    if (retryInMatch) {
-      return Math.ceil(parseFloat(retryInMatch[1])) * 1000;
-    }
-
-    return null;
   }
 
   /**
