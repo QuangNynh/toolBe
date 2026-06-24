@@ -1,0 +1,6 @@
+coqui-tts
+torch
+torchaudio
+fastapi
+uvicorn[standard]
+python-multipart

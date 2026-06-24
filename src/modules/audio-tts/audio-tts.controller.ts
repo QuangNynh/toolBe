@@ -20,80 +20,225 @@ import { diskStorage } from 'multer';
 import { extname } from 'path';
 import { Response } from 'express';
 import * as fs from 'fs';
-import * as os from 'os';
-import * as path from 'path';
-
 import { AudioTtsService } from './audio-tts.service';
-import { GenerateTtsDto } from './dto/generate-tts.dto';
-import { GeminiVoice } from './constants/voices.constant';
+import { TtsSrtDto } from './dto/tts-srt.dto';
+import { CloneVoiceDto } from './dto/clone-voice.dto';
 
-@ApiTags('Audio TTS')
-@Controller('audio-tts')
+@ApiTags('TTS')
+@Controller('tts')
 export class AudioTtsController {
   constructor(private readonly audioTtsService: AudioTtsService) {}
 
-  // ─── List Voices ──────────────────────────────────────────────────────
-
+  // ─────────────────────────────────────────────
+  // GET /api/v1/tts/voices
+  // ─────────────────────────────────────────────
   @Get('voices')
   @ApiOperation({
-    summary: 'Get the list of available Gemini TTS voices',
+    summary: 'Get all available voices (built-in + cloned)',
+    description:
+      'Returns a list of built-in XTTS v2 speakers and user-cloned voices.',
   })
   @ApiResponse({
     status: 200,
-    description: 'Returns supported voice list with id, gender, and character.',
+    description: 'List of available voices.',
+    schema: {
+      type: 'object',
+      properties: {
+        builtin: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              id: { type: 'string' },
+              name: { type: 'string' },
+              type: { type: 'string', example: 'builtin' },
+            },
+          },
+        },
+        cloned: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              id: { type: 'string' },
+              name: { type: 'string' },
+              type: { type: 'string', example: 'cloned' },
+              file: { type: 'string' },
+              description: { type: 'string' },
+            },
+          },
+        },
+        total: { type: 'number' },
+      },
+    },
   })
-  getVoices(): { voices: GeminiVoice[]; total: number } {
-    const voices = this.audioTtsService.getAvailableVoices();
-    return { voices, total: voices.length };
+  async getVoices() {
+    return this.audioTtsService.getVoices();
   }
 
-  // ─── Generate TTS from SRT ────────────────────────────────────────────
-
-  @Post('generate')
+  // ─────────────────────────────────────────────
+  // GET /api/v1/tts/languages
+  // ─────────────────────────────────────────────
+  @Get('languages')
   @ApiOperation({
-    summary:
-      'Upload an SRT file and generate a timeline-accurate MP3 audio using Gemini TTS',
+    summary: 'Get supported languages',
+    description:
+      'Returns a list of all languages supported by the XTTS v2 model.',
+  })
+  @ApiResponse({ status: 200, description: 'List of supported languages.' })
+  async getLanguages() {
+    return this.audioTtsService.getLanguages();
+  }
+
+  // ─────────────────────────────────────────────
+  // POST /api/v1/tts/clone-voice
+  // ─────────────────────────────────────────────
+  @Post('clone-voice')
+  @ApiOperation({
+    summary: 'Clone a voice from reference audio',
+    description:
+      'Upload a WAV/MP3 audio file (6-10s of clean speech) to create a cloned voice for TTS.',
   })
   @ApiConsumes('multipart/form-data')
   @ApiBody({
     schema: {
       type: 'object',
-      required: ['file', 'voice'],
+      required: ['file', 'name'],
+      properties: {
+        file: {
+          type: 'string',
+          format: 'binary',
+          description: 'Reference audio file (WAV/MP3, 6-10s clean speech)',
+        },
+        name: {
+          type: 'string',
+          description: 'Name for the cloned voice',
+          example: 'My Voice',
+        },
+        description: {
+          type: 'string',
+          description: 'Optional description',
+          example: 'Vietnamese male voice',
+        },
+      },
+    },
+  })
+  @ApiResponse({ status: 201, description: 'Voice cloned successfully.' })
+  @ApiResponse({ status: 400, description: 'Invalid audio file or cloning failed.' })
+  @UseInterceptors(
+    FileInterceptor('file', {
+      storage: diskStorage({
+        destination: './uploads',
+        filename: (_req, file, cb) => {
+          const randomName = Array(32)
+            .fill(null)
+            .map(() => Math.round(Math.random() * 16).toString(16))
+            .join('');
+          cb(null, `voice_${randomName}${extname(file.originalname)}`);
+        },
+      }),
+      fileFilter: (_req, file, cb) => {
+        const ext = extname(file.originalname).toLowerCase();
+        if (!['.wav', '.mp3', '.flac', '.ogg'].includes(ext)) {
+          cb(
+            new BadRequestException(
+              `Unsupported audio format: ${ext}. Allowed: .wav, .mp3, .flac, .ogg`,
+            ),
+            false,
+          );
+          return;
+        }
+        cb(null, true);
+      },
+      limits: { fileSize: 50 * 1024 * 1024 }, // 50MB max
+    }),
+  )
+  async cloneVoice(
+    @UploadedFile() file: Express.Multer.File,
+    @Body() dto: CloneVoiceDto,
+  ) {
+    if (!file) {
+      throw new BadRequestException('No audio file uploaded.');
+    }
+
+    return this.audioTtsService.cloneVoice(
+      dto.name,
+      dto.description || '',
+      file.path,
+      file.originalname,
+    );
+  }
+
+  // ─────────────────────────────────────────────
+  // POST /api/v1/tts/srt
+  // ─────────────────────────────────────────────
+  @Post('srt')
+  @ApiOperation({
+    summary: 'TTS from SRT subtitle file',
+    description: `Upload an SRT file and generate speech audio that matches the subtitle timeline.
+    
+**Process:**
+1. Parse SRT into segments with timestamps
+2. TTS each segment using XTTS v2
+3. Measure duration of each generated audio
+4. Auto-stretch/compress each segment to match the SRT timeline
+5. Insert silence for gaps between segments
+6. Concatenate into a single audio file
+
+**Returns:** Audio file (WAV or MP3) with speech perfectly aligned to the SRT timeline.`,
+  })
+  @ApiConsumes('multipart/form-data')
+  @ApiBody({
+    schema: {
+      type: 'object',
+      required: ['file', 'language'],
       properties: {
         file: {
           type: 'string',
           format: 'binary',
           description: 'SRT subtitle file',
         },
-        voice: {
+        speaker: {
           type: 'string',
           description:
-            'Gemini TTS voice name (e.g. Kore, Zephyr, Puck, Charon)',
-          example: 'Kore',
+            'Built-in speaker name (e.g., "Claribel Dervla"). Use GET /tts/voices to see available speakers.',
         },
-        model: {
+        voice_id: {
           type: 'string',
           description:
-            'Gemini TTS model (optional, defaults to gemini-2.5-flash-preview-tts)',
-          example: 'gemini-2.5-flash-preview-tts',
+            'Cloned voice ID (from POST /tts/clone-voice). Use this OR speaker, not both.',
         },
-        apiKey: {
+        language: {
           type: 'string',
-          description:
-            'Gemini API Key (optional — overrides server .env key)',
-          example: 'AIzaSy...',
+          description: 'Language code',
+          enum: [
+            'en', 'es', 'fr', 'de', 'it', 'pt', 'pl',
+            'tr', 'ru', 'nl', 'cs', 'ar', 'zh-cn',
+            'ja', 'hu', 'ko', 'hi', 'vi',
+          ],
+          example: 'vi',
+        },
+        format: {
+          type: 'string',
+          description: 'Output audio format',
+          enum: ['wav', 'mp3'],
+          default: 'wav',
         },
       },
     },
   })
   @ApiResponse({
     status: 200,
-    description: 'Generated MP3 audio file download.',
+    description: 'Generated audio file matching the SRT timeline.',
+    content: {
+      'audio/wav': { schema: { type: 'string', format: 'binary' } },
+      'audio/mpeg': { schema: { type: 'string', format: 'binary' } },
+    },
   })
+  @ApiResponse({ status: 400, description: 'Invalid SRT file or TTS failed.' })
   @ApiResponse({
-    status: 400,
-    description:
-      'Bad request — missing file, invalid voice, or invalid SRT format.',
+    status: 503,
+    description: 'XTTS server is not available.',
   })
   @UseInterceptors(
     FileInterceptor('file', {
@@ -104,107 +249,96 @@ export class AudioTtsController {
             .fill(null)
             .map(() => Math.round(Math.random() * 16).toString(16))
             .join('');
-          cb(null, `${randomName}${extname(file.originalname)}`);
+          cb(null, `srt_${randomName}${extname(file.originalname)}`);
         },
       }),
       fileFilter: (_req, file, cb) => {
         const ext = extname(file.originalname).toLowerCase();
         if (ext !== '.srt') {
           cb(
-            new BadRequestException('Only .srt files are allowed.'),
+            new BadRequestException(
+              `Only .srt files are allowed. Got: ${ext}`,
+            ),
             false,
           );
           return;
         }
         cb(null, true);
       },
-      limits: {
-        fileSize: 10 * 1024 * 1024, // 10MB max for SRT files
-      },
+      limits: { fileSize: 10 * 1024 * 1024 }, // 10MB max
     }),
   )
-  async generateTts(
+  async ttsSrt(
     @UploadedFile() file: Express.Multer.File,
-    @Body() dto: GenerateTtsDto,
+    @Body() dto: TtsSrtDto,
     @Res({ passthrough: false }) res: Response,
   ): Promise<void> {
     if (!file) {
       throw new BadRequestException('No SRT file uploaded.');
     }
 
-    // Read the SRT content
-    const srtContent = fs.readFileSync(file.path, 'utf-8');
+    if (!dto.speaker && !dto.voice_id) {
+      // Cleanup uploaded file
+      if (fs.existsSync(file.path)) fs.unlinkSync(file.path);
+      throw new BadRequestException(
+        'Either "speaker" (built-in voice) or "voice_id" (cloned voice) must be provided.',
+      );
+    }
 
-    // Clean up the uploaded file immediately after reading
-    this.safeDelete(file.path);
+    const format = dto.format || 'wav';
 
-    // Prepare the output MP3 path
-    const originalName = path.basename(
-      file.originalname,
-      path.extname(file.originalname),
-    );
-    const outputFilename = `${originalName}_${dto.voice}.mp3`;
-    const outputPath = path.join(os.tmpdir(), `tts-output-${Date.now()}.mp3`);
-
-    try {
-      // Run the full TTS pipeline
-      await this.audioTtsService.generateAudioFromSrt(
-        srtContent,
-        dto.voice,
-        outputPath,
-        dto.model,
-        dto.apiKey,
+    const { outputPath, outputFilename, segments } =
+      await this.audioTtsService.processSrt(
+        file.path,
+        dto.speaker,
+        dto.voice_id,
+        dto.language,
+        format,
       );
 
-      // Verify the output exists
-      if (!fs.existsSync(outputPath)) {
-        throw new BadRequestException(
-          'TTS generation completed but output file is missing.',
-        );
-      }
-
-      // Get file size for Content-Length
+    try {
       const stat = fs.statSync(outputPath);
+      const mimeType =
+        format === 'mp3' ? 'audio/mpeg' : 'audio/wav';
 
-      // Set response headers
-      res.setHeader('Content-Type', 'audio/mpeg');
+      // Add segment timeline info as a custom header
+      res.setHeader(
+        'X-TTS-Segments',
+        JSON.stringify(
+          segments.map((s) => ({
+            id: s.segmentId,
+            text: s.text.substring(0, 100),
+            srtMs: `${s.srtStartMs}-${s.srtEndMs}`,
+            ttsDurationMs: s.ttsDurationMs,
+            tempo: s.tempoRatio,
+          })),
+        ),
+      );
+
+      res.setHeader('Content-Type', mimeType);
       res.setHeader('Content-Length', stat.size.toString());
       res.setHeader(
         'Content-Disposition',
         `attachment; filename="${encodeURIComponent(outputFilename)}"`,
       );
 
-      // Stream the MP3 to the client
       const stream = fs.createReadStream(outputPath);
       stream.pipe(res);
 
-      // Cleanup once streaming finishes
       res.on('finish', () => {
-        this.safeDelete(outputPath);
+        // Cleanup the entire work directory
+        const workDir = require('path').dirname(outputPath);
+        this.audioTtsService.cleanupDir(workDir);
       });
 
       stream.on('error', () => {
-        this.safeDelete(outputPath);
+        const workDir = require('path').dirname(outputPath);
+        this.audioTtsService.cleanupDir(workDir);
       });
     } catch (error) {
-      // Cleanup on error
-      this.safeDelete(outputPath);
+      const workDir = require('path').dirname(outputPath);
+      this.audioTtsService.cleanupDir(workDir);
       throw error;
-    }
-  }
-
-  // ─── Helpers ──────────────────────────────────────────────────────────
-
-  /**
-   * Safely delete a file without throwing if it doesn't exist.
-   */
-  private safeDelete(filePath: string): void {
-    try {
-      if (fs.existsSync(filePath)) {
-        fs.unlinkSync(filePath);
-      }
-    } catch {
-      // ignore cleanup errors
     }
   }
 }

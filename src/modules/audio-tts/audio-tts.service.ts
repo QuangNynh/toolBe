@@ -2,589 +2,581 @@ import {
   Injectable,
   Logger,
   BadRequestException,
-  InternalServerErrorException,
-  OnModuleInit,
+  ServiceUnavailableException,
 } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
-import { GoogleGenAI } from '@google/genai';
-import * as ffmpeg from 'fluent-ffmpeg';
-import * as ffmpegInstaller from '@ffmpeg-installer/ffmpeg';
+import axios from 'axios';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-import SrtParser2 from 'srt-parser-2';
+import * as Ffmpeg from 'fluent-ffmpeg';
+import * as FormData from 'form-data';
 
-import {
-  GEMINI_VOICES,
-  GeminiVoice,
-} from './constants/voices.constant';
-
-// ──────────────────────────────────────────────────────────────────────────────
-// Set FFmpeg binary path from the bundled installer
-// ──────────────────────────────────────────────────────────────────────────────
-ffmpeg.setFfmpegPath(ffmpegInstaller.path);
-
-/** Represents one parsed SRT line from srt-parser-2 */
-interface SrtLine {
-  id: string;
-  startTime: string;
-  startSeconds: number;
-  endTime: string;
-  endSeconds: number;
+/** Parsed SRT segment */
+interface SrtSegment {
+  id: number;
+  startTime: string; // "00:00:01,000"
+  endTime: string; // "00:00:03,500"
   text: string;
+  startMs: number;
+  endMs: number;
+  durationMs: number;
+}
+
+/** Per-segment processing result */
+interface SegmentResult {
+  segmentId: number;
+  text: string;
+  srtStartMs: number;
+  srtEndMs: number;
+  srtDurationMs: number;
+  ttsDurationMs: number;
+  tempoRatio: number;
+  stretchedPath: string;
 }
 
 @Injectable()
-export class AudioTtsService implements OnModuleInit {
+export class AudioTtsService {
   private readonly logger = new Logger(AudioTtsService.name);
+  private readonly xttsBaseUrl: string;
 
-  /** Default GenAI client from .env — may be null */
-  private defaultGenAI: GoogleGenAI | null = null;
+  constructor() {
+    this.xttsBaseUrl =
+      process.env.XTTS_SERVER_URL || 'http://localhost:8888';
+  }
 
-  private readonly TTS_MODEL = 'gemini-2.5-flash-preview-tts';
-
-  /** Retry configuration for transient Gemini API errors */
-  private readonly MAX_RETRIES = 5;
-  private readonly BASE_DELAY_MS = 2000;
+  // ─────────────────────────────────────────────
+  // Public API methods
+  // ─────────────────────────────────────────────
 
   /**
-   * Max characters per TTS chunk. Gemini TTS has input limits, and very long
-   * text can cause timeouts or 500 internal errors on Google's side.
-   * We split into smaller chunks (1500 chars) for stability and speed.
+   * Get all available voices (built-in + cloned) from the XTTS server.
    */
-  private readonly MAX_CHARS_PER_CHUNK = 1500;
-
-  /** Delay between chunk requests (ms) to avoid rate limiting */
-  private readonly CHUNK_DELAY_MS = 3000;
-
-  constructor(private readonly configService: ConfigService) {}
-
-  onModuleInit(): void {
-    const apiKey = this.configService.get<string>('GEMINI_API_KEY');
-    if (apiKey) {
-      this.defaultGenAI = new GoogleGenAI({ apiKey });
-      this.logger.log('Default GoogleGenAI client initialized for TTS.');
-    } else {
-      this.logger.warn(
-        'No GEMINI_API_KEY in .env — API key must be provided per-request.',
+  async getVoices(): Promise<any> {
+    try {
+      const { data } = await axios.get(
+        `${this.xttsBaseUrl}/speakers`,
+      );
+      return data;
+    } catch (error) {
+      this.logger.error('Failed to fetch voices from XTTS server', error);
+      throw new ServiceUnavailableException(
+        'XTTS server is not available. Make sure it is running.',
       );
     }
   }
 
-  // ─── Public API ──────────────────────────────────────────────────────────
-
   /**
-   * Return the list of available Gemini TTS voices.
+   * Get supported languages from the XTTS server.
    */
-  getAvailableVoices(): GeminiVoice[] {
-    return GEMINI_VOICES;
+  async getLanguages(): Promise<any> {
+    try {
+      const { data } = await axios.get(
+        `${this.xttsBaseUrl}/languages`,
+      );
+      return data;
+    } catch (error) {
+      this.logger.error('Failed to fetch languages', error);
+      throw new ServiceUnavailableException(
+        'XTTS server is not available.',
+      );
+    }
   }
 
   /**
-   * Smart TTS pipeline:
-   *   1. Parse SRT → extract all subtitle text
-   *   2. If text is short enough → 1 single API call
-   *   3. If text is too long  → split into smart chunks, 1 call per chunk
-   *   4. Merge audio chunks + convert to MP3
-   *
-   * @param srtContent    Raw SRT file content (UTF-8 string)
-   * @param selectedVoice Voice name (e.g. 'Kore')
-   * @param outputMp3Path Absolute path where the final MP3 will be written
-   * @param modelName     Optional TTS model name (defaults to gemini-2.5-flash-preview-tts)
-   * @param apiKey        Optional per-request Gemini API key
+   * Clone a voice by uploading a WAV file to the XTTS server.
    */
-  async generateAudioFromSrt(
-    srtContent: string,
-    selectedVoice: string,
-    outputMp3Path: string,
-    modelName?: string,
-    apiKey?: string,
-  ): Promise<void> {
-    // 1. Validate the chosen voice
-    const voice = GEMINI_VOICES.find(
-      (v) => v.id.toLowerCase() === selectedVoice.toLowerCase(),
-    );
-    if (!voice) {
-      const valid = GEMINI_VOICES.map((v) => v.id).join(', ');
-      throw new BadRequestException(
-        `Voice "${selectedVoice}" is not supported. Available voices: ${valid}`,
+  async cloneVoice(
+    name: string,
+    description: string,
+    filePath: string,
+    originalFilename: string,
+  ): Promise<any> {
+    try {
+      const form = new FormData();
+      form.append('name', name);
+      form.append('description', description || '');
+      form.append('file', fs.createReadStream(filePath), {
+        filename: originalFilename,
+      });
+
+      const { data } = await axios.post(
+        `${this.xttsBaseUrl}/clone-voice`,
+        form,
+        { headers: form.getHeaders() },
       );
-    }
 
-    // 2. Parse the SRT content
-    const parser = new SrtParser2();
-    const lines: SrtLine[] = parser.fromSrt(srtContent);
-
-    if (!lines || lines.length === 0) {
+      return data;
+    } catch (error) {
+      const message =
+        error?.response?.data?.detail ||
+        error?.message ||
+        'Unknown error';
+      this.logger.error(`Voice cloning failed: ${message}`);
       throw new BadRequestException(
-        'No valid subtitle lines found in the uploaded SRT file.',
+        `Voice cloning failed: ${message}`,
       );
+    } finally {
+      // Cleanup uploaded file
+      if (fs.existsSync(filePath)) {
+        fs.unlinkSync(filePath);
+      }
     }
+  }
 
-    const model = modelName || this.TTS_MODEL;
-
-    // 3. Build combined text from subtitle lines
-    const combinedText = this.buildCombinedText(lines);
-
-    this.logger.log(
-      `TTS pipeline: ${lines.length} lines, ${combinedText.length} chars, voice="${voice.id}", model="${model}"`,
+  /**
+   * Process an SRT file: TTS each segment, stretch to match timeline, concatenate.
+   * Returns the path to the final audio file.
+   */
+  async processSrt(
+    srtFilePath: string,
+    speaker: string | undefined,
+    voiceId: string | undefined,
+    language: string,
+    outputFormat: string = 'wav',
+  ): Promise<{ outputPath: string; outputFilename: string; segments: SegmentResult[] }> {
+    const workDir = path.join(
+      os.tmpdir(),
+      `tts-srt-${Date.now()}`,
     );
-
-    // 4. Split into chunks if text is too long
-    const textChunks = this.splitTextIntoChunks(combinedText);
-
-    this.logger.log(
-      `Split into ${textChunks.length} chunk(s) — will use ${textChunks.length} API request(s)`,
-    );
-
-    const client = this.getClient(apiKey);
-    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tts-'));
+    fs.mkdirSync(workDir, { recursive: true });
 
     try {
-      const audioChunkPaths: string[] = [];
+      // 1. Parse SRT
+      const srtContent = fs.readFileSync(srtFilePath, 'utf-8');
+      const segments = this.parseSrt(srtContent);
 
-      for (let i = 0; i < textChunks.length; i++) {
-        const chunk = textChunks[i];
-
-        this.logger.debug(
-          `Processing chunk ${i + 1}/${textChunks.length}: ${chunk.length} chars`,
-        );
-
-        // Rate limit delay between chunks (skip first)
-        if (i > 0) {
-          this.logger.debug(
-            `Waiting ${this.CHUNK_DELAY_MS}ms before next chunk...`,
-          );
-          await this.delay(this.CHUNK_DELAY_MS);
-        }
-
-        const chunkAudioPath = path.join(tempDir, `chunk_${i}.wav`);
-
-        await this.callGeminiTtsWithRetry(
-          client,
-          chunk,
-          voice.id,
-          chunkAudioPath,
-          model,
-          i + 1,
-          textChunks.length,
-        );
-
-        audioChunkPaths.push(chunkAudioPath);
-      }
-
-      // 5. If single chunk → direct convert. If multiple → concat and convert.
-      if (audioChunkPaths.length === 1) {
-        this.logger.debug('Single chunk — converting directly to MP3...');
-        await this.convertToMp3(audioChunkPaths[0], outputMp3Path);
-      } else {
-        this.logger.debug(
-          `Merging and converting ${audioChunkPaths.length} audio chunks directly to MP3...`,
-        );
-        await this.concatAndConvertToMp3(audioChunkPaths, outputMp3Path);
+      if (segments.length === 0) {
+        throw new BadRequestException('SRT file contains no segments.');
       }
 
       this.logger.log(
-        `TTS completed (${textChunks.length} request(s)) → ${outputMp3Path}`,
+        `📄 Parsed ${segments.length} segments from SRT`,
       );
-    } finally {
-      this.cleanupTempDir(tempDir);
-    }
-  }
 
-  // ─── Private helpers ─────────────────────────────────────────────────────
+      // 2. TTS each segment
+      const segmentResults: SegmentResult[] = [];
 
-  /**
-   * Resolve the GoogleGenAI client. Per-request key takes priority.
-   */
-  private getClient(apiKey?: string): GoogleGenAI {
-    if (apiKey) {
-      return new GoogleGenAI({ apiKey });
-    }
-    if (this.defaultGenAI) {
-      return this.defaultGenAI;
-    }
-    throw new BadRequestException(
-      'No API key provided. Pass "apiKey" in the request or configure GEMINI_API_KEY in .env.',
-    );
-  }
-
-  /**
-   * Build a single text block from all SRT subtitle lines.
-   * Paragraph breaks create natural TTS pauses.
-   */
-  private buildCombinedText(lines: SrtLine[]): string {
-    const parts: string[] = [];
-
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i];
-      const text = line.text.replace(/\n/g, ' ').trim();
-      if (!text) continue;
-
-      // Extra break for large timing gaps (> 2s)
-      if (i > 0) {
-        const gap = line.startSeconds - lines[i - 1].endSeconds;
-        if (gap > 2.0) {
-          parts.push('');
-        }
-      }
-
-      parts.push(text);
-    }
-
-    return parts.join('\n\n');
-  }
-
-  /**
-   * Split combined text into chunks that respect the max char limit.
-   * Splits on paragraph boundaries (\n\n) to avoid cutting mid-sentence.
-   */
-  private splitTextIntoChunks(text: string): string[] {
-    // If short enough, return as single chunk
-    if (text.length <= this.MAX_CHARS_PER_CHUNK) {
-      return [text];
-    }
-
-    const paragraphs = text.split('\n\n');
-    const chunks: string[] = [];
-    let currentChunk = '';
-
-    for (const paragraph of paragraphs) {
-      const candidate = currentChunk
-        ? currentChunk + '\n\n' + paragraph
-        : paragraph;
-
-      if (candidate.length > this.MAX_CHARS_PER_CHUNK && currentChunk) {
-        // Current chunk is full — push it and start a new one
-        chunks.push(currentChunk.trim());
-        currentChunk = paragraph;
-      } else {
-        currentChunk = candidate;
-      }
-    }
-
-    // Push the last chunk
-    if (currentChunk.trim()) {
-      chunks.push(currentChunk.trim());
-    }
-
-    return chunks;
-  }
-
-  // ─── Gemini TTS call ───────────────────────────────────────────────────
-
-  /**
-   * Call Gemini TTS with exponential-backoff retry.
-   */
-  private async callGeminiTtsWithRetry(
-    client: GoogleGenAI,
-    text: string,
-    voiceName: string,
-    outputPath: string,
-    model: string,
-    chunkIndex: number,
-    totalChunks: number,
-  ): Promise<void> {
-    let lastError: unknown;
-
-    for (let attempt = 1; attempt <= this.MAX_RETRIES; attempt++) {
-      try {
-        await this.callGeminiTts(client, text, voiceName, outputPath, model);
-        return;
-      } catch (error: unknown) {
-        lastError = error;
-
-        // Log full error details for debugging
-        const errorDetail = this.extractErrorDetail(error);
-        this.logger.error(
-          `TTS chunk ${chunkIndex}/${totalChunks} attempt ${attempt}/${this.MAX_RETRIES} error: ${errorDetail}`,
+      for (const segment of segments) {
+        this.logger.log(
+          `🎤 TTS segment ${segment.id}/${segments.length}: "${segment.text.substring(0, 50)}..."`,
         );
 
-        if (!this.isRetryableError(error)) {
-          this.logger.error('Error is NOT retryable — failing immediately.');
-          break;
-        }
+        // 2a. Call XTTS server for this segment
+        const ttsAudioPath = path.join(
+          workDir,
+          `tts_${segment.id}.wav`,
+        );
+        await this.callTts(
+          segment.text,
+          language,
+          speaker,
+          voiceId,
+          ttsAudioPath,
+        );
 
-        if (attempt === this.MAX_RETRIES) {
-          this.logger.error(
-            `TTS chunk ${chunkIndex}/${totalChunks} failed after ${this.MAX_RETRIES} attempts.`,
-          );
-          break;
-        }
+        // 2b. Measure TTS audio duration
+        const ttsDurationMs = await this.getAudioDurationMs(ttsAudioPath);
 
-        let delayMs = this.BASE_DELAY_MS * Math.pow(2, attempt - 1);
-        const serverRetryDelaySec = this.extractRetryDelaySeconds(error);
-        if (serverRetryDelaySec !== null) {
-          delayMs = Math.ceil(serverRetryDelaySec * 1000) + 1000; // Add 1s safety buffer
-          this.logger.warn(
-            `Server requested retry delay. Waiting ${serverRetryDelaySec}s (+1s safety buffer, total ${delayMs}ms)...`,
-          );
-        } else {
-          this.logger.warn(
-            `Retrying in ${delayMs}ms...`,
-          );
-        }
-        await this.delay(delayMs);
+        // 2c. Calculate tempo ratio and stretch
+        const srtDurationMs = segment.durationMs;
+        let tempoRatio = ttsDurationMs / srtDurationMs;
+
+        // Clamp to reasonable range (0.25x to 4x)
+        tempoRatio = Math.max(0.25, Math.min(4.0, tempoRatio));
+
+        this.logger.log(
+          `  ⏱ SRT: ${srtDurationMs}ms | TTS: ${ttsDurationMs}ms | Tempo: ${tempoRatio.toFixed(3)}`,
+        );
+
+        const stretchedPath = path.join(
+          workDir,
+          `stretched_${segment.id}.wav`,
+        );
+
+        await this.stretchAudio(
+          ttsAudioPath,
+          stretchedPath,
+          tempoRatio,
+        );
+
+        segmentResults.push({
+          segmentId: segment.id,
+          text: segment.text,
+          srtStartMs: segment.startMs,
+          srtEndMs: segment.endMs,
+          srtDurationMs,
+          ttsDurationMs,
+          tempoRatio,
+          stretchedPath,
+        });
       }
-    }
 
-    const message = this.extractErrorDetail(lastError);
-    throw new InternalServerErrorException(
-      `TTS generation failed: ${message}`,
-    );
-  }
+      // 3. Build timeline: insert silences between segments
+      this.logger.log('🔗 Building final timeline...');
+      const timelineParts: string[] = [];
 
-  /**
-   * Single Gemini TTS API call. Saves the returned audio buffer to disk.
-   */
-  private async callGeminiTts(
-    client: GoogleGenAI,
-    text: string,
-    voiceName: string,
-    outputPath: string,
-    model: string,
-  ): Promise<void> {
-    this.logger.debug(
-      `Calling Gemini TTS: model="${model}", voice="${voiceName}", text=${text.length} chars`,
-    );
+      for (let i = 0; i < segmentResults.length; i++) {
+        const seg = segmentResults[i];
 
-    const response = await client.models.generateContent({
-      model,
-      contents: text,
-      config: {
-        responseModalities: ['AUDIO'],
-        speechConfig: {
-          voiceConfig: {
-            prebuiltVoiceConfig: {
-              voiceName,
-            },
-          },
-        },
-      },
-    });
+        // Calculate silence before this segment
+        const prevEndMs =
+          i === 0 ? 0 : segmentResults[i - 1].srtEndMs;
+        const silenceDurationMs = seg.srtStartMs - prevEndMs;
 
-    // Extract inline audio data from the response
-    const part = response.candidates?.[0]?.content?.parts?.[0];
-    if (!part || !part.inlineData?.data) {
-      // Log what we actually got back for debugging
-      this.logger.error(
-        `Gemini TTS response structure: ${JSON.stringify({
-          hasCandidates: !!response.candidates,
-          candidateCount: response.candidates?.length ?? 0,
-          hasParts: !!response.candidates?.[0]?.content?.parts,
-          partCount: response.candidates?.[0]?.content?.parts?.length ?? 0,
-        })}`,
+        if (silenceDurationMs > 10) {
+          // Generate silence (skip tiny gaps < 10ms)
+          const silencePath = path.join(
+            workDir,
+            `silence_${i}.wav`,
+          );
+          await this.generateSilence(
+            silencePath,
+            silenceDurationMs / 1000,
+          );
+          timelineParts.push(silencePath);
+        }
+
+        timelineParts.push(seg.stretchedPath);
+      }
+
+      // 4. Concatenate all parts
+      const outputFilename = `tts_srt_${Date.now()}.${outputFormat}`;
+      const outputPath = path.join(workDir, outputFilename);
+
+      await this.concatenateAudio(timelineParts, outputPath, outputFormat);
+
+      this.logger.log(
+        `✅ Final audio created: ${outputFilename}`,
       );
-      throw new Error('Gemini TTS returned no audio data.');
+
+      // 5. Cleanup SRT file
+      if (fs.existsSync(srtFilePath)) {
+        fs.unlinkSync(srtFilePath);
+      }
+
+      return {
+        outputPath,
+        outputFilename,
+        segments: segmentResults.map((s) => ({
+          ...s,
+          stretchedPath: undefined, // Don't expose internal paths
+        })) as any,
+      };
+    } catch (error) {
+      // Cleanup on error
+      if (fs.existsSync(srtFilePath)) {
+        fs.unlinkSync(srtFilePath);
+      }
+      this.cleanupDir(workDir);
+      throw error;
     }
-
-    const audioBuffer = Buffer.from(part.inlineData.data, 'base64');
-    fs.writeFileSync(outputPath, audioBuffer);
-
-    this.logger.debug(
-      `Received audio: ${(audioBuffer.length / 1024).toFixed(1)} KB`,
-    );
   }
 
-  // ─── FFmpeg helpers ────────────────────────────────────────────────────
+  // ─────────────────────────────────────────────
+  // SRT Parsing
+  // ─────────────────────────────────────────────
+
+  private parseSrt(content: string): SrtSegment[] {
+    const segments: SrtSegment[] = [];
+    // Normalize line endings
+    const normalized = content.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+    const blocks = normalized.split(/\n\n+/).filter((b) => b.trim());
+
+    for (const block of blocks) {
+      const lines = block.trim().split('\n');
+      if (lines.length < 3) continue;
+
+      const id = parseInt(lines[0].trim(), 10);
+      if (isNaN(id)) continue;
+
+      const timeLine = lines[1].trim();
+      const timeMatch = timeLine.match(
+        /(\d{2}:\d{2}:\d{2}[,\.]\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2}[,\.]\d{3})/,
+      );
+      if (!timeMatch) continue;
+
+      const startTime = timeMatch[1];
+      const endTime = timeMatch[2];
+      const text = lines
+        .slice(2)
+        .join(' ')
+        .replace(/<[^>]*>/g, '') // Strip HTML tags
+        .trim();
+
+      if (!text) continue;
+
+      const startMs = this.srtTimeToMs(startTime);
+      const endMs = this.srtTimeToMs(endTime);
+
+      segments.push({
+        id,
+        startTime,
+        endTime,
+        text,
+        startMs,
+        endMs,
+        durationMs: endMs - startMs,
+      });
+    }
+
+    return segments;
+  }
+
+  private srtTimeToMs(time: string): number {
+    // "00:01:23,456" or "00:01:23.456" → milliseconds
+    const parts = time.replace(',', '.').split(':');
+    const hours = parseInt(parts[0], 10);
+    const minutes = parseInt(parts[1], 10);
+    const secParts = parts[2].split('.');
+    const seconds = parseInt(secParts[0], 10);
+    const ms = parseInt(secParts[1], 10);
+    return hours * 3600000 + minutes * 60000 + seconds * 1000 + ms;
+  }
+
+  // ─────────────────────────────────────────────
+  // XTTS Server Communication
+  // ─────────────────────────────────────────────
+
+  private async callTts(
+    text: string,
+    language: string,
+    speaker: string | undefined,
+    voiceId: string | undefined,
+    outputPath: string,
+  ): Promise<void> {
+    const form = new FormData();
+    form.append('text', text);
+    form.append('language', language);
+
+    if (voiceId) {
+      form.append('voice_id', voiceId);
+    } else if (speaker) {
+      form.append('speaker', speaker);
+    } else {
+      throw new BadRequestException(
+        'Either speaker or voice_id must be provided.',
+      );
+    }
+
+    try {
+      const response = await axios.post(
+        `${this.xttsBaseUrl}/tts`,
+        form,
+        {
+          headers: form.getHeaders(),
+          responseType: 'arraybuffer',
+          timeout: 120000, // 2 min timeout per segment
+        },
+      );
+
+      fs.writeFileSync(outputPath, Buffer.from(response.data));
+    } catch (error) {
+      const message =
+        error?.response?.data
+          ? Buffer.from(error.response.data).toString('utf-8')
+          : error?.message || 'Unknown error';
+      throw new BadRequestException(
+        `TTS failed for text "${text.substring(0, 30)}...": ${message}`,
+      );
+    }
+  }
+
+  // ─────────────────────────────────────────────
+  // FFmpeg Audio Processing
+  // ─────────────────────────────────────────────
 
   /**
-   * Convert raw audio (WAV/PCM from Gemini) to MP3.
+   * Get audio duration in milliseconds using ffprobe.
    */
-  private convertToMp3(
+  private getAudioDurationMs(filePath: string): Promise<number> {
+    return new Promise((resolve, reject) => {
+      Ffmpeg.ffprobe(filePath, (err, metadata) => {
+        if (err) {
+          reject(
+            new BadRequestException(
+              `Failed to probe audio: ${err.message}`,
+            ),
+          );
+          return;
+        }
+        const durationSec = metadata.format.duration || 0;
+        resolve(Math.round(durationSec * 1000));
+      });
+    });
+  }
+
+  /**
+   * Stretch or compress audio using ffmpeg atempo filter.
+   * tempoRatio > 1 = speed up (TTS is longer than SRT, need to compress)
+   * tempoRatio < 1 = slow down (TTS is shorter than SRT, need to stretch)
+   *
+   * atempo filter supports range [0.5, 100.0].
+   * For values < 0.5, chain multiple atempo filters.
+   */
+  private stretchAudio(
     inputPath: string,
     outputPath: string,
+    tempoRatio: number,
   ): Promise<void> {
-    return new Promise<void>((resolve, reject) => {
-      ffmpeg()
-        .input(inputPath)
-        .inputOptions(['-f', 's16le', '-ar', '24000', '-ac', '1'])
-        .audioCodec('libmp3lame')
-        .audioBitrate('192k')
-        .outputOptions('-ar', '24000')
-        .save(outputPath)
-        .on('end', () => {
-          this.logger.debug('MP3 conversion completed.');
-          resolve();
-        })
-        .on('error', (err: Error) => {
-          this.logger.error(`MP3 conversion failed: ${err.message}`);
-          reject(
-            new InternalServerErrorException(
-              `Failed to convert audio to MP3: ${err.message}`,
-            ),
-          );
-        });
-    });
-  }
+    return new Promise((resolve, reject) => {
+      // If ratio is very close to 1.0, just copy
+      if (Math.abs(tempoRatio - 1.0) < 0.02) {
+        fs.copyFileSync(inputPath, outputPath);
+        resolve();
+        return;
+      }
 
-  /**
-   * Concatenate multiple audio chunks and convert to MP3 directly using complex filter.
-   * This bypasses the demuxer, avoids any safe path limitations, and is extremely resilient.
-   */
-  private concatAndConvertToMp3(
-    inputPaths: string[],
-    outputPath: string,
-  ): Promise<void> {
-    return new Promise<void>((resolve, reject) => {
-      const command = ffmpeg();
-      inputPaths.forEach((p) => {
-        command.input(p).inputOptions(['-f', 's16le', '-ar', '24000', '-ac', '1']);
-      });
+      // Build atempo filter chain
+      const atempoFilters = this.buildAtempoFilters(tempoRatio);
 
-      command.complexFilter([
-        {
-          filter: 'concat',
-          options: {
-            n: inputPaths.length,
-            v: 0,
-            a: 1,
-          },
-          inputs: inputPaths.map((_, idx) => `${idx}:a`),
-          outputs: 'outa',
-        },
-      ]);
+      const command = Ffmpeg(inputPath)
+        .audioFilters(atempoFilters)
+        .audioCodec('pcm_s16le')
+        .audioChannels(1)
+        .audioFrequency(24000)
+        .output(outputPath);
 
       command
-        .map('outa')
-        .audioCodec('libmp3lame')
-        .audioBitrate('192k')
-        .outputOptions('-ar', '24000')
-        .save(outputPath)
-        .on('end', () => {
-          this.logger.debug('Audio concat and MP3 conversion completed.');
-          resolve();
-        })
+        .on('end', () => resolve())
         .on('error', (err: Error) => {
-          this.logger.error(`Audio concat and MP3 conversion failed: ${err.message}`);
           reject(
-            new InternalServerErrorException(
-              `Failed to merge and convert audio chunks: ${err.message}`,
+            new BadRequestException(
+              `Audio stretching failed: ${err.message}`,
             ),
           );
-        });
+        })
+        .run();
     });
   }
 
-  // ─── Cleanup & utilities ──────────────────────────────────────────────
+  /**
+   * Build atempo filter chain.
+   * atempo supports [0.5, 100.0] per filter instance.
+   * For ratios < 0.5, chain multiple atempo=0.5 filters + remainder.
+   * For ratios > 100, chain multiple atempo=100 filters + remainder.
+   */
+  private buildAtempoFilters(ratio: number): string[] {
+    const filters: string[] = [];
+
+    if (ratio < 0.5) {
+      // Chain multiple atempo=0.5 until remaining ratio >= 0.5
+      let remaining = ratio;
+      while (remaining < 0.5) {
+        filters.push('atempo=0.5');
+        remaining /= 0.5;
+      }
+      filters.push(`atempo=${remaining.toFixed(4)}`);
+    } else if (ratio > 100.0) {
+      let remaining = ratio;
+      while (remaining > 100.0) {
+        filters.push('atempo=100.0');
+        remaining /= 100.0;
+      }
+      filters.push(`atempo=${remaining.toFixed(4)}`);
+    } else {
+      filters.push(`atempo=${ratio.toFixed(4)}`);
+    }
+
+    return filters;
+  }
 
   /**
-   * Recursively delete a temporary directory and all its contents.
+   * Generate a silence WAV file with the given duration.
    */
-  private cleanupTempDir(dirPath: string): void {
+  private generateSilence(
+    outputPath: string,
+    durationSec: number,
+  ): Promise<void> {
+    return new Promise((resolve, reject) => {
+      Ffmpeg()
+        .input('anullsrc=r=24000:cl=mono')
+        .inputFormat('lavfi')
+        .duration(durationSec)
+        .audioCodec('pcm_s16le')
+        .audioChannels(1)
+        .audioFrequency(24000)
+        .output(outputPath)
+        .on('end', () => resolve())
+        .on('error', (err: Error) => {
+          reject(
+            new BadRequestException(
+              `Silence generation failed: ${err.message}`,
+            ),
+          );
+        })
+        .run();
+    });
+  }
+
+  /**
+   * Concatenate multiple audio files into a single output file.
+   * Uses ffmpeg concat demuxer for seamless joining.
+   */
+  private concatenateAudio(
+    inputPaths: string[],
+    outputPath: string,
+    format: string = 'wav',
+  ): Promise<void> {
+    return new Promise((resolve, reject) => {
+      if (inputPaths.length === 0) {
+        reject(new BadRequestException('No audio files to concatenate.'));
+        return;
+      }
+
+      if (inputPaths.length === 1) {
+        fs.copyFileSync(inputPaths[0], outputPath);
+        resolve();
+        return;
+      }
+
+      // Create a concat list file
+      const listPath = outputPath + '.list.txt';
+      const listContent = inputPaths
+        .map((p) => `file '${p.replace(/'/g, "'\\''")}'`)
+        .join('\n');
+      fs.writeFileSync(listPath, listContent);
+
+      const command = Ffmpeg()
+        .input(listPath)
+        .inputOptions(['-f', 'concat', '-safe', '0'])
+        .audioChannels(1)
+        .audioFrequency(24000);
+
+      if (format === 'mp3') {
+        command.audioCodec('libmp3lame').audioBitrate('192k');
+      } else {
+        command.audioCodec('pcm_s16le');
+      }
+
+      command
+        .output(outputPath)
+        .on('end', () => {
+          // Cleanup list file
+          fs.unlinkSync(listPath);
+          resolve();
+        })
+        .on('error', (err: Error) => {
+          if (fs.existsSync(listPath)) fs.unlinkSync(listPath);
+          reject(
+            new BadRequestException(
+              `Audio concatenation failed: ${err.message}`,
+            ),
+          );
+        })
+        .run();
+    });
+  }
+
+  /**
+   * Cleanup a temporary directory.
+   */
+  cleanupDir(dirPath: string): void {
     try {
       if (fs.existsSync(dirPath)) {
         fs.rmSync(dirPath, { recursive: true, force: true });
-        this.logger.debug(`Cleaned up temp directory: ${dirPath}`);
       }
-    } catch (error) {
-      this.logger.warn(`Failed to cleanup temp dir ${dirPath}: ${error}`);
-    }
-  }
-
-  /**
-   * Extract detailed error info for logging.
-   */
-  private extractErrorDetail(error: unknown): string {
-    if (error instanceof Error) {
-      // Check for nested cause (Node.js fetch errors)
-      const cause = (error as { cause?: Error }).cause;
-      if (cause) {
-        return `${error.message} → Cause: ${cause.message}`;
-      }
-      return error.message;
-    }
-    try {
-      return JSON.stringify(error);
     } catch {
-      return String(error);
+      this.logger.warn(`Failed to cleanup directory: ${dirPath}`);
     }
-  }
-
-  /**
-   * Extract retryDelay seconds from Google GenAI API error response if available.
-   */
-  private extractRetryDelaySeconds(error: unknown): number | null {
-    try {
-      let errObj: any = null;
-      if (typeof error === 'object' && error !== null) {
-        errObj = error;
-      }
-      if (error instanceof Error) {
-        try {
-          errObj = JSON.parse(error.message);
-        } catch {
-          if ((error as any).error) {
-            errObj = (error as any).error;
-          }
-        }
-      }
-
-      if (!errObj) return null;
-
-      const apiErr = errObj.error || errObj;
-      if (apiErr && Array.isArray(apiErr.details)) {
-        for (const detail of apiErr.details) {
-          if (
-            detail &&
-            (detail['@type']?.includes('RetryInfo') || detail.retryDelay)
-          ) {
-            const delayStr = detail.retryDelay;
-            if (typeof delayStr === 'string') {
-              const seconds = parseFloat(delayStr.replace('s', ''));
-              if (!isNaN(seconds)) {
-                return seconds;
-              }
-            }
-          }
-        }
-      }
-    } catch (e) {
-      this.logger.debug(`Failed to parse retry delay from error: ${e}`);
-    }
-    return null;
-  }
-
-  /**
-   * Check if an error is retryable (transient API / network errors).
-   */
-  private isRetryableError(error: unknown): boolean {
-    const errorStr = this.extractErrorDetail(error);
-
-    // If quota limit is explicitly 0, it means the model is not allowed/enabled on this tier.
-    // Retrying is futile, so fail immediately.
-    if (errorStr.includes('limit: 0') || errorStr.includes('limit:0')) {
-      return false;
-    }
-
-    const retryablePatterns = [
-      '500',                   // Internal Server Error
-      '502',                   // Bad Gateway
-      '503',                   // Service Unavailable
-      '504',                   // Gateway Timeout
-      '429',                   // Too Many Requests
-      'INTERNAL',              // Google RPC internal status
-      'UNAVAILABLE',
-      'RESOURCE_EXHAUSTED',
-      'fetch failed',          // network / DNS / timeout
-      'ECONNRESET',
-      'ETIMEDOUT',
-      'ENOTFOUND',
-      'socket hang up',
-      'network',
-      'timeout',
-      'bad_gateway',
-      'gateway_timeout',
-    ];
-    return retryablePatterns.some((pattern) =>
-      errorStr.toLowerCase().includes(pattern.toLowerCase()),
-    );
-  }
-
-  /**
-   * Wait for a given number of milliseconds.
-   */
-  private delay(ms: number): Promise<void> {
-    return new Promise((resolve) => setTimeout(resolve, ms));
   }
 }
