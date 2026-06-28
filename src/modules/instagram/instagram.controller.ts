@@ -19,6 +19,19 @@ export class InstagramController {
     return this.instagramService.getVideoInfo(dto.url);
   }
 
+  @Post('/video')
+  @ApiOperation({ summary: 'Tải video từ Instagram (Post hoặc Reel)' })
+  @ApiResponse({
+    status: 200,
+    description: 'Video stream từ Instagram',
+  })
+  async downloadVideo(
+    @Body() dto: InstagramDownloadDto,
+    @Res({ passthrough: false }) res: Response,
+  ) {
+    return this.instagramService.downloadVideo(dto.url, res);
+  }
+
   @Post('/audio')
   @ApiOperation({ summary: 'Tải audio từ Instagram (Post hoặc Reel)' })
   @ApiResponse({

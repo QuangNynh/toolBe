@@ -325,6 +325,63 @@ export class InstagramService {
   }
 
   /**
+   * Streams the Instagram video directly to the Express Response
+   */
+  async downloadVideo(url: string, res: Response) {
+    const data = await this.getInstagramData(url);
+
+    if (!data || !data.media_details || data.media_details.length === 0) {
+      throw new BadRequestException('Cannot retrieve media details from this Instagram URL');
+    }
+
+    const videoMedia = data.media_details.find((m) => m.type === 'video');
+    if (!videoMedia) {
+      throw new BadRequestException('No video found in this Instagram post');
+    }
+
+    const videoUrl = videoMedia.url;
+    const username = data.post_info?.owner_username || 'instagram';
+    const filename = `instagram_${username}_${Date.now()}.mp4`;
+
+    res.setHeader('Content-Type', 'video/mp4');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+
+    // 1. Try streaming with proxy
+    try {
+      const proxyUrl = this.proxyService.getProxyUrl();
+      this.logger.log(`Attempting to stream video using proxy...`);
+      const agent = new HttpsProxyAgent(proxyUrl);
+      const response = await axios({
+        url: videoUrl,
+        method: 'GET',
+        responseType: 'stream',
+        httpsAgent: agent,
+        httpAgent: agent,
+        headers: this.getDownloadHeaders(),
+      });
+      response.data.pipe(res);
+      return;
+    } catch (proxyError: any) {
+      this.logger.warn(`Failed to stream video using proxy: ${proxyError.message}. Retrying direct download...`);
+    }
+
+    // 2. Fallback to direct stream
+    try {
+      this.logger.log(`Streaming video directly to client...`);
+      const response = await axios({
+        url: videoUrl,
+        method: 'GET',
+        responseType: 'stream',
+        headers: this.getDownloadHeaders(),
+      });
+      response.data.pipe(res);
+    } catch (directError: any) {
+      this.logger.error(`Direct video download failed: ${directError.message}`);
+      throw new BadRequestException(`Could not stream video: ${directError.message}`);
+    }
+  }
+
+  /**
    * Downloads the Instagram video, extracts its audio, and streams the MP3
    */
   async downloadAudio(url: string, res: Response) {
