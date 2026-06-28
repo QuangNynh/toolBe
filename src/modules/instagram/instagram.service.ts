@@ -64,6 +64,23 @@ export class InstagramService {
   }
 
   /**
+   * Helper to extract username from an Instagram profile URL or use it directly if it's already a username
+   */
+  private getUsername(input: string): string {
+    const trimmed = input.trim();
+
+    // If it looks like a URL (contains slashes or instagram.com)
+    if (trimmed.includes('/') || trimmed.includes('instagram.com')) {
+      const match = trimmed.match(/(?:instagram\.com\/)([A-Za-z0-9_.-]+)/);
+      if (!match) {
+        throw new BadRequestException('Invalid Instagram profile URL.');
+      }
+      return match[1];
+    }
+    return trimmed;
+  }
+
+  /**
    * Fetches Instagram landing page to extract CSRF token and Cookie headers.
    * Fixes the library bug where it only checked the first cookie.
    */
@@ -321,6 +338,117 @@ export class InstagramService {
       height: videoMedia.dimensions?.height,
       views: videoMedia.video_view_count,
       resultsNumber: data.results_number,
+    };
+  }
+
+  /**
+   * Fetch all posts/videos of a single Instagram channel/user
+   */
+  async getChannelVideos(usernameOrUrl: string, typeFilter?: string) {
+    const username = this.getUsername(usernameOrUrl);
+    this.logger.log(`Fetching channel videos for username: ${username}`);
+
+    const url = `https://www.instagram.com/api/v1/feed/user/${username}/username/`;
+    const proxyUrl = this.proxyService.getProxyUrl();
+    const agent = new HttpsProxyAgent(proxyUrl);
+
+    let responseData: any;
+    let fetched = false;
+
+    // 1. Try with proxy
+    try {
+      this.logger.log(`Attempting to fetch user feed using proxy: ${proxyUrl}`);
+      const response = await axios.request({
+        method: 'GET',
+        url,
+        httpsAgent: agent,
+        httpAgent: agent,
+        headers: this.getUserFeedHeaders(username),
+      });
+      responseData = response.data;
+      fetched = true;
+    } catch (proxyError: any) {
+      this.logger.warn(`Proxy request for user feed failed: ${proxyError.message}. Retrying direct connection...`);
+    }
+
+    // 2. Fallback to direct connection
+    if (!fetched) {
+      try {
+        this.logger.log(`Fetching user feed directly (no proxy)`);
+        const response = await axios.request({
+          method: 'GET',
+          url,
+          headers: this.getUserFeedHeaders(username),
+        });
+        responseData = response.data;
+      } catch (directError: any) {
+        this.logger.error(`Direct user feed request failed: ${directError.message}`);
+        throw new BadRequestException(`Failed to retrieve user feed: ${directError.message}`);
+      }
+    }
+
+    // 3. Format output
+    if (!responseData || !responseData.items) {
+      throw new BadRequestException('No items returned for this user feed.');
+    }
+
+    let items = responseData.items.map((item: any) => {
+      let type = 'image';
+      if (item.media_type === 2) {
+        type = 'video';
+      } else if (item.media_type === 8) {
+        type = 'carousel';
+      }
+
+      return {
+        id: item.id,
+        shortcode: item.code,
+        type,
+        title: item.caption?.text || '',
+        videoUrl: item.video_versions?.[0]?.url || null,
+        thumbnailUrl: item.image_versions2?.candidates?.[0]?.url || null,
+        likes: item.like_count || 0,
+        comments: item.comment_count || 0,
+        views: item.play_count || item.view_count || 0,
+        takenAt: item.taken_at,
+      };
+    });
+
+    // 4. Filter by type if provided (e.g. ?type=image,carousel)
+    if (typeFilter) {
+      const allowedFilters = ['video', 'image', 'carousel'];
+      const targetTypes = typeFilter
+        .split(',')
+        .map((t) => t.toLowerCase().trim())
+        .filter((t) => allowedFilters.includes(t));
+
+      if (targetTypes.length > 0) {
+        this.logger.log(`Filtering user feed items by types: ${targetTypes.join(', ')}`);
+        items = items.filter((item: any) => targetTypes.includes(item.type));
+      }
+    }
+
+    return {
+      success: true,
+      user: {
+        username: responseData.user?.username || username,
+        fullname: responseData.user?.full_name || '',
+        profilePicUrl: responseData.user?.profile_pic_url || '',
+        id: responseData.user?.pk || '',
+      },
+      items,
+    };
+  }
+
+  private getUserFeedHeaders(username: string) {
+    return {
+      'User-Agent':
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      'Accept': '*/*',
+      'Accept-Language': 'en-US,en;q=0.9',
+      'X-IG-App-ID': '936619743392459',
+      'Referer': `https://www.instagram.com/${username}/`,
+      'Origin': 'https://www.instagram.com',
     };
   }
 

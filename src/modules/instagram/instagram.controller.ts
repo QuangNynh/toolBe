@@ -1,7 +1,8 @@
-import { Body, Controller, Post, Res } from '@nestjs/common';
-import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
+import { Body, Controller, Post, Res, Query } from '@nestjs/common';
+import { ApiOperation, ApiResponse, ApiTags, ApiQuery } from '@nestjs/swagger';
 import { Response } from 'express';
 import { InstagramDownloadDto } from './dto/instagram-download.dto';
+import { InstagramChannelDto } from './dto/instagram-channel.dto';
 import { InstagramService } from './instagram.service';
 
 @ApiTags('Instagram')
@@ -43,5 +44,24 @@ export class InstagramController {
     @Res({ passthrough: false }) res: Response,
   ) {
     return this.instagramService.downloadAudio(dto.url, res);
+  }
+
+  @Post('/channel')
+  @ApiOperation({ summary: 'Lấy danh sách bài viết/video từ kênh/profile Instagram' })
+  @ApiQuery({
+    name: 'type',
+    required: false,
+    description: 'Lọc loại bài viết: video, image, carousel (có thể kết hợp bằng dấu phẩy, vd: image,carousel)',
+    example: 'video',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Danh sách các bài viết/video của kênh',
+  })
+  async getChannelVideos(
+    @Body() dto: InstagramChannelDto,
+    @Query('type') type?: string,
+  ) {
+    return this.instagramService.getChannelVideos(dto.username, type);
   }
 }
