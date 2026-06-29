@@ -108,6 +108,26 @@ export class InstagramController {
     return this.instagramService.exportChannelVideosToExcel(dto.username, res, type);
   }
 
+  @Post('/channel/export-images')
+  @ApiOperation({ summary: 'Tải toàn bộ ảnh bài viết của kênh dưới dạng file ZIP' })
+  @ApiQuery({
+    name: 'type',
+    required: false,
+    description: 'Lọc loại bài viết trước khi tải ảnh: video, image, carousel (optional)',
+    example: 'video',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Trả về tệp tin ZIP chứa toàn bộ ảnh bài viết được đổi tên theo STT',
+  })
+  async exportChannelImages(
+    @Body() dto: InstagramChannelDto,
+    @Res() res: Response,
+    @Query('type') type?: string,
+  ) {
+    return this.instagramService.exportChannelImagesToZip(dto.username, res, type);
+  }
+
   @Post('/channel/clear-cache')
   @ApiOperation({ summary: 'Xóa toàn bộ bộ nhớ đệm (JSON) của tất cả các kênh' })
   @ApiResponse({

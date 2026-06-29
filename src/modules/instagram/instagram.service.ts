@@ -6,6 +6,8 @@ import * as os from 'os';
 import { Response } from 'express';
 import { HttpsProxyAgent } from 'https-proxy-agent';
 import * as ExcelJS from 'exceljs';
+import { ZipArchive } from 'archiver';
+import pLimit from 'p-limit';
 import { MediaService } from '../media/media.service';
 import { ProxyService } from '../proxy/proxy.service';
 
@@ -594,6 +596,9 @@ export class InstagramService {
       }
     }
 
+    // Sort items by takenAt in ascending order (oldest to newest)
+    filteredItems.sort((a, b) => (a.takenAt || 0) - (b.takenAt || 0));
+
     // 5. Slice exactly to the requested page and pageSize
     const startIndex = (page - 1) * pageSize;
     const endIndex = startIndex + pageSize;
@@ -658,6 +663,9 @@ export class InstagramService {
       }
     }
 
+    // Sort items by takenAt in ascending order (oldest to newest)
+    items.sort((a, b) => (a.takenAt || 0) - (b.takenAt || 0));
+
     // Create workbook and worksheet using exceljs
     const workbook = new ExcelJS.Workbook();
     const worksheet = workbook.addWorksheet('Instagram Posts');
@@ -717,6 +725,122 @@ export class InstagramService {
     // Write file stream directly to client response
     await workbook.xlsx.write(res);
     res.end();
+  }
+
+  /**
+   * Downloads all matching channel post images, names them by STT (e.g. 1.jpg, 2.jpg)
+   * and sends them inside a compressed ZIP archive.
+   */
+  async exportChannelImagesToZip(
+    usernameOrUrl: string,
+    res: Response,
+    typeFilter?: string,
+  ) {
+    const username = this.getUsername(usernameOrUrl);
+    this.logger.log(
+      `Exporting channel images to ZIP for: ${username}, filter: ${typeFilter}`,
+    );
+
+    const cacheDir = path.join(process.cwd(), 'data', 'instagram');
+    const cacheFilePath = path.join(cacheDir, `${username}.json`);
+
+    if (!fs.existsSync(cacheFilePath)) {
+      throw new BadRequestException(
+        `No cached data found for channel ${username}. ` +
+        `Please fetch the channel feed or run the scraper first.`
+      );
+    }
+
+    let items: any[] = [];
+    try {
+      const fileContent = fs.readFileSync(cacheFilePath, 'utf-8');
+      const cacheData = JSON.parse(fileContent);
+      items = cacheData.items || [];
+    } catch (err: any) {
+      throw new BadRequestException(`Failed to read cache file: ${err.message}`);
+    }
+
+    // Filter by type if provided
+    if (typeFilter) {
+      const allowedFilters = ['video', 'image', 'carousel'];
+      const targetTypes = typeFilter
+        .split(',')
+        .map((t) => t.toLowerCase().trim())
+        .filter((t) => allowedFilters.includes(t));
+
+      if (targetTypes.length > 0) {
+        items = items.filter((item: any) => targetTypes.includes(item.type));
+      }
+    }
+
+    // Sort items by takenAt in ascending order (oldest to newest)
+    items.sort((a, b) => (a.takenAt || 0) - (b.takenAt || 0));
+
+    if (items.length === 0) {
+      throw new BadRequestException('No items found matching the filter.');
+    }
+
+    // Setup headers for zip file download
+    const filename = `instagram_images_${username}_${Date.now()}.zip`;
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+
+    // Create zip archive using ZipArchive class from archiver v8.0.0
+    const archive = new ZipArchive({ zlib: { level: 9 } });
+
+    // Handle archive errors
+    archive.on('error', (err) => {
+      this.logger.error(`Archiver error: ${err.message}`);
+    });
+
+    // Pipe archive output to Express Response
+    archive.pipe(res);
+
+    // Download images concurrently with a limit of 10
+    const limit = pLimit(10);
+
+    const downloadPromises = items.map((item, index) => {
+      return limit(async () => {
+        const stt = index + 1;
+        const url = item.thumbnailUrl;
+        if (!url) return;
+
+        try {
+          // Detect file extension from URL
+          let ext = '.jpg';
+          if (url.includes('.webp')) ext = '.webp';
+          else if (url.includes('.png')) ext = '.png';
+
+          const response = await axios({
+            method: 'GET',
+            url,
+            responseType: 'arraybuffer',
+            timeout: 15000,
+            headers: {
+              'User-Agent':
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            },
+          });
+
+          const buffer = Buffer.from(response.data);
+          archive.append(buffer, { name: `${stt}${ext}` });
+        } catch (err: any) {
+          this.logger.warn(
+            `Failed to download image ${stt} for channel ${username} from ${url}: ${err.message}`
+          );
+        }
+      });
+    });
+
+    try {
+      await Promise.all(downloadPromises);
+      await archive.finalize();
+    } catch (err: any) {
+      this.logger.error(`Failed to finalize zip archive: ${err.message}`);
+      if (!res.headersSent) {
+        throw new BadRequestException(`Failed to generate ZIP archive: ${err.message}`);
+      }
+    }
   }
 
   /**
