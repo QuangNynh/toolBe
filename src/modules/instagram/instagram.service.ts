@@ -5,6 +5,7 @@ import * as path from 'path';
 import * as os from 'os';
 import { Response } from 'express';
 import { HttpsProxyAgent } from 'https-proxy-agent';
+import * as ExcelJS from 'exceljs';
 import { MediaService } from '../media/media.service';
 import { ProxyService } from '../proxy/proxy.service';
 
@@ -342,13 +343,10 @@ export class InstagramService {
   }
 
   /**
-   * Fetch all posts/videos of a single Instagram channel/user
+   * Fetches Instagram profile information (to retrieve followers count, total posts count, etc.)
    */
-  async getChannelVideos(usernameOrUrl: string, typeFilter?: string) {
-    const username = this.getUsername(usernameOrUrl);
-    this.logger.log(`Fetching channel videos for username: ${username}`);
-
-    const url = `https://www.instagram.com/api/v1/feed/user/${username}/username/`;
+  private async getWebProfileInfo(username: string): Promise<any> {
+    const url = `https://www.instagram.com/api/v1/users/web_profile_info/?username=${username}`;
     const proxyUrl = this.proxyService.getProxyUrl();
     const agent = new HttpsProxyAgent(proxyUrl);
 
@@ -357,7 +355,7 @@ export class InstagramService {
 
     // 1. Try with proxy
     try {
-      this.logger.log(`Attempting to fetch user feed using proxy: ${proxyUrl}`);
+      this.logger.log(`Fetching web profile info using proxy: ${proxyUrl}`);
       const response = await axios.request({
         method: 'GET',
         url,
@@ -368,13 +366,13 @@ export class InstagramService {
       responseData = response.data;
       fetched = true;
     } catch (proxyError: any) {
-      this.logger.warn(`Proxy request for user feed failed: ${proxyError.message}. Retrying direct connection...`);
+      this.logger.warn(`Proxy request for web profile info failed: ${proxyError.message}. Retrying direct...`);
     }
 
     // 2. Fallback to direct connection
     if (!fetched) {
       try {
-        this.logger.log(`Fetching user feed directly (no proxy)`);
+        this.logger.log(`Fetching web profile info directly (no proxy)`);
         const response = await axios.request({
           method: 'GET',
           url,
@@ -382,39 +380,208 @@ export class InstagramService {
         });
         responseData = response.data;
       } catch (directError: any) {
-        this.logger.error(`Direct user feed request failed: ${directError.message}`);
-        throw new BadRequestException(`Failed to retrieve user feed: ${directError.message}`);
+        this.logger.error(`Direct request for web profile info failed: ${directError.message}`);
+        throw new BadRequestException(`Failed to retrieve web profile info: ${directError.message}`);
       }
     }
 
-    // 3. Format output
-    if (!responseData || !responseData.items) {
-      throw new BadRequestException('No items returned for this user feed.');
+    if (!responseData || !responseData.data || !responseData.data.user) {
+      throw new BadRequestException('Failed to extract user profile data.');
     }
 
-    let items = responseData.items.map((item: any) => {
-      let type = 'image';
-      if (item.media_type === 2) {
-        type = 'video';
-      } else if (item.media_type === 8) {
-        type = 'carousel';
+    return responseData.data.user;
+  }
+
+  /**
+   * Fetch all posts/videos of a single Instagram channel/user with page and pageSize pagination
+   * Option B: Always fetch up to MAX_PAGES = Math.ceil(overallTotalCount / 12) to crawl all items.
+   * Leverages file caching inside project directory 'data/instagram/' to prevent redundant Instagram hits.
+   */
+  async getChannelVideos(
+    usernameOrUrl: string,
+    typeFilter?: string,
+    page: number = 1,
+    pageSize: number = 10,
+  ) {
+    const username = this.getUsername(usernameOrUrl);
+    this.logger.log(
+      `Fetching channel videos (Option B with file cache) for username: ${username}, page: ${page}, pageSize: ${pageSize}, filter: ${typeFilter}`,
+    );
+
+    if (page < 1) page = 1;
+    if (pageSize < 1) pageSize = 10;
+    if (pageSize > 200) pageSize = 200; // Limit page size to avoid massive requests
+
+    const targetCount = page * pageSize;
+
+    // Establish cache file location
+    const cacheDir = path.join(process.cwd(), 'data', 'instagram');
+    fs.mkdirSync(cacheDir, { recursive: true });
+    const cacheFilePath = path.join(cacheDir, `${username}.json`);
+
+    let cachedData: {
+      user: any;
+      items: any[];
+      overallTotalCount: number;
+    } | null = null;
+
+    // Try reading cache file if it exists
+    if (fs.existsSync(cacheFilePath)) {
+      try {
+        this.logger.log(`Loading cached data from project file: ${cacheFilePath}`);
+        const fileContent = fs.readFileSync(cacheFilePath, 'utf-8');
+        cachedData = JSON.parse(fileContent);
+      } catch (err: any) {
+        this.logger.error(`Failed to read or parse cache file: ${err.message}. Will fetch fresh data.`);
+      }
+    }
+
+    let overallTotalCount = 0;
+    let formattedItems: any[] = [];
+    let userProfile: any = null;
+
+    if (cachedData) {
+      userProfile = cachedData.user;
+      formattedItems = cachedData.items;
+      overallTotalCount = cachedData.overallTotalCount;
+    } else {
+      // Safety check to prevent hitting rate limits ONLY when cache doesn't exist
+      if (targetCount > 500) {
+        throw new BadRequestException(
+          `Request offset (${targetCount}) is too high for first-time fetching. ` +
+          `Please run the background crawler command "node scripts/scrape-instagram.js ${username}" first to download the feed locally.`
+        );
       }
 
-      return {
-        id: item.id,
-        shortcode: item.code,
-        type,
-        title: item.caption?.text || '',
-        videoUrl: item.video_versions?.[0]?.url || null,
-        thumbnailUrl: item.image_versions2?.candidates?.[0]?.url || null,
-        likes: item.like_count || 0,
-        comments: item.comment_count || 0,
-        views: item.play_count || item.view_count || 0,
-        takenAt: item.taken_at,
+      // 1. Fetch web profile info to get the total count of posts and user details
+      const profileInfo = await this.getWebProfileInfo(username);
+      overallTotalCount = profileInfo.edge_owner_to_timeline_media?.count || 0;
+      userProfile = {
+        username: profileInfo.username || username,
+        fullname: profileInfo.full_name || '',
+        profilePicUrl: profileInfo.profile_pic_url || '',
+        id: profileInfo.pk || '',
+        followersCount: profileInfo.edge_followed_by?.count || 0,
+        followingCount: profileInfo.edge_follow?.count || 0,
       };
-    });
 
-    // 4. Filter by type if provided (e.g. ?type=image,carousel)
+      // 2. Fetch feed items sequentially from Instagram to collect all available posts up to MAX_PAGES
+      const baseFeedUrl = `https://www.instagram.com/api/v1/feed/user/${username}/username/`;
+      const proxyUrl = this.proxyService.getProxyUrl();
+      const agent = new HttpsProxyAgent(proxyUrl);
+
+      let allItems: any[] = [];
+      let currentMaxId: string | null = null;
+      let hasMore = true;
+      let pagesFetched = 0;
+
+      // Dynamically calculate MAX_PAGES to crawl the entire channel
+      const MAX_PAGES = overallTotalCount > 0 ? Math.ceil(overallTotalCount / 12) : 100;
+
+      while (hasMore && pagesFetched < MAX_PAGES) {
+        let url = baseFeedUrl;
+        if (currentMaxId) {
+          url += `?max_id=${currentMaxId}`;
+        }
+
+        this.logger.log(
+          `Fetching page ${pagesFetched + 1}/${MAX_PAGES} for ${username}...`,
+        );
+        let responseData: any;
+        let fetched = false;
+
+        // Try with proxy
+        try {
+          const response = await axios.request({
+            method: 'GET',
+            url,
+            httpsAgent: agent,
+            httpAgent: agent,
+            headers: this.getUserFeedHeaders(username),
+          });
+          responseData = response.data;
+          fetched = true;
+        } catch (proxyError: any) {
+          this.logger.warn(
+            `Proxy request page ${pagesFetched + 1} failed: ${proxyError.message}. Retrying direct...`,
+          );
+        }
+
+        // Fallback to direct connection
+        if (!fetched) {
+          try {
+            const response = await axios.request({
+              method: 'GET',
+              url,
+              headers: this.getUserFeedHeaders(username),
+            });
+            responseData = response.data;
+          } catch (directError: any) {
+            this.logger.error(`Direct user feed request failed: ${directError.message}`);
+            throw new BadRequestException(
+              `Failed to retrieve user feed on page ${pagesFetched + 1}: ${directError.message}`,
+            );
+          }
+        }
+
+        if (!responseData || !responseData.items) {
+          break;
+        }
+
+        allItems = allItems.concat(responseData.items);
+        hasMore = responseData.more_available === true;
+        currentMaxId = responseData.next_max_id;
+        pagesFetched++;
+
+        if (!currentMaxId) {
+          hasMore = false;
+        }
+
+        // Small sleep to prevent quick rate limit bans
+        if (hasMore) {
+          await new Promise((resolve) => setTimeout(resolve, 250));
+        }
+      }
+
+      // Format items
+      formattedItems = allItems.map((item: any) => {
+        let type = 'image';
+        if (item.media_type === 2) {
+          type = 'video';
+        } else if (item.media_type === 8) {
+          type = 'carousel';
+        }
+
+        return {
+          id: item.id,
+          shortcode: item.code,
+          type,
+          title: item.caption?.text || '',
+          videoUrl: item.video_versions?.[0]?.url || null,
+          thumbnailUrl: item.image_versions2?.candidates?.[0]?.url || null,
+          likes: item.like_count || 0,
+          comments: item.comment_count || 0,
+          views: item.play_count || item.view_count || 0,
+          takenAt: item.taken_at,
+        };
+      });
+
+      // Save to cache file inside the project directory
+      try {
+        const dataToCache = {
+          user: userProfile,
+          items: formattedItems,
+          overallTotalCount,
+        };
+        this.logger.log(`Caching feed data to file: ${cacheFilePath}`);
+        fs.writeFileSync(cacheFilePath, JSON.stringify(dataToCache, null, 2), 'utf-8');
+      } catch (err: any) {
+        this.logger.error(`Failed to write cache file: ${err.message}`);
+      }
+    }
+
+    // Apply type filter if provided
+    let filteredItems = [...formattedItems];
     if (typeFilter) {
       const allowedFilters = ['video', 'image', 'carousel'];
       const targetTypes = typeFilter
@@ -423,21 +590,170 @@ export class InstagramService {
         .filter((t) => allowedFilters.includes(t));
 
       if (targetTypes.length > 0) {
-        this.logger.log(`Filtering user feed items by types: ${targetTypes.join(', ')}`);
+        filteredItems = filteredItems.filter((item: any) => targetTypes.includes(item.type));
+      }
+    }
+
+    // 5. Slice exactly to the requested page and pageSize
+    const startIndex = (page - 1) * pageSize;
+    const endIndex = startIndex + pageSize;
+    const slicedItems = filteredItems.slice(startIndex, endIndex);
+
+    return {
+      success: true,
+      user: userProfile,
+      items: slicedItems,
+      pagination: {
+        page,
+        pageSize,
+        totalCount: filteredItems.length,
+        hasMore: filteredItems.length > endIndex,
+      },
+    };
+  }
+
+  /**
+   * Exports all channel posts matching the filter to an Excel sheet.
+   * Leverages cached project data file.
+   */
+  async exportChannelVideosToExcel(
+    usernameOrUrl: string,
+    res: Response,
+    typeFilter?: string,
+  ) {
+    const username = this.getUsername(usernameOrUrl);
+    this.logger.log(
+      `Exporting channel data to Excel for: ${username}, filter: ${typeFilter}`,
+    );
+
+    const cacheDir = path.join(process.cwd(), 'data', 'instagram');
+    const cacheFilePath = path.join(cacheDir, `${username}.json`);
+
+    if (!fs.existsSync(cacheFilePath)) {
+      throw new BadRequestException(
+        `No cached data found for channel ${username}. ` +
+        `Please fetch the channel feed or run the scraper first.`
+      );
+    }
+
+    let items: any[] = [];
+    try {
+      const fileContent = fs.readFileSync(cacheFilePath, 'utf-8');
+      const cacheData = JSON.parse(fileContent);
+      items = cacheData.items || [];
+    } catch (err: any) {
+      throw new BadRequestException(`Failed to read cache file: ${err.message}`);
+    }
+
+    // Filter by type if provided
+    if (typeFilter) {
+      const allowedFilters = ['video', 'image', 'carousel'];
+      const targetTypes = typeFilter
+        .split(',')
+        .map((t) => t.toLowerCase().trim())
+        .filter((t) => allowedFilters.includes(t));
+
+      if (targetTypes.length > 0) {
         items = items.filter((item: any) => targetTypes.includes(item.type));
       }
     }
 
-    return {
-      success: true,
-      user: {
-        username: responseData.user?.username || username,
-        fullname: responseData.user?.full_name || '',
-        profilePicUrl: responseData.user?.profile_pic_url || '',
-        id: responseData.user?.pk || '',
-      },
-      items,
-    };
+    // Create workbook and worksheet using exceljs
+    const workbook = new ExcelJS.Workbook();
+    const worksheet = workbook.addWorksheet('Instagram Posts');
+
+    // Define columns
+    worksheet.columns = [
+      { header: 'STT', key: 'stt', width: 8 },
+      { header: 'Link', key: 'link', width: 45 },
+      { header: 'Like', key: 'likes', width: 12 },
+      { header: 'Lượt xem', key: 'views', width: 15 },
+      { header: 'Ngày tạo', key: 'takenAt', width: 18 },
+    ];
+
+    // Format header styling (Bold, centered, clean layout)
+    worksheet.getRow(1).font = { bold: true };
+    worksheet.getRow(1).alignment = { vertical: 'middle', horizontal: 'center' };
+
+    // Add rows
+    items.forEach((item, index) => {
+      let dateStr = '';
+      if (item.takenAt) {
+        const date = new Date(item.takenAt * 1000);
+        const day = String(date.getDate()).padStart(2, '0');
+        const month = String(date.getMonth() + 1).padStart(2, '0');
+        const year = date.getFullYear();
+        dateStr = `${day}/${month}/${year}`;
+      }
+
+      const link = `https://www.instagram.com/p/${item.shortcode}/`;
+
+      worksheet.addRow({
+        stt: index + 1,
+        link: link,
+        likes: item.likes || 0,
+        views: item.views || 0,
+        takenAt: dateStr,
+      });
+    });
+
+    // Formatting column alignments
+    worksheet.getColumn('stt').alignment = { horizontal: 'center' };
+    worksheet.getColumn('likes').alignment = { horizontal: 'right' };
+    worksheet.getColumn('views').alignment = { horizontal: 'right' };
+    worksheet.getColumn('takenAt').alignment = { horizontal: 'center' };
+
+    // Setup browser download headers
+    const filename = `instagram_export_${username}_${Date.now()}.xlsx`;
+    res.setHeader(
+      'Content-Type',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    );
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="${filename}"`,
+    );
+
+    // Write file stream directly to client response
+    await workbook.xlsx.write(res);
+    res.end();
+  }
+
+  /**
+   * Deletes all cached JSON files in the 'data/instagram/' directory.
+   */
+  async clearAllChannelCache() {
+    const cacheDir = path.join(process.cwd(), 'data', 'instagram');
+
+    if (!fs.existsSync(cacheDir)) {
+      return {
+        success: true,
+        message: 'No cache directory found. Nothing to clear.',
+        deletedFilesCount: 0,
+      };
+    }
+
+    try {
+      const files = fs.readdirSync(cacheDir);
+      let deletedCount = 0;
+
+      for (const file of files) {
+        if (file.endsWith('.json')) {
+          const filePath = path.join(cacheDir, file);
+          fs.unlinkSync(filePath);
+          deletedCount++;
+        }
+      }
+
+      this.logger.log(`Cleared all Instagram cache. Deleted ${deletedCount} files.`);
+      return {
+        success: true,
+        message: `Successfully cleared all Instagram cache files.`,
+        deletedFilesCount: deletedCount,
+      };
+    } catch (err: any) {
+      throw new BadRequestException(`Failed to clear cache directory: ${err.message}`);
+    }
   }
 
   private getUserFeedHeaders(username: string) {

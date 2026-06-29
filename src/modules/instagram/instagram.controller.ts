@@ -54,14 +54,67 @@ export class InstagramController {
     description: 'Lọc loại bài viết: video, image, carousel (có thể kết hợp bằng dấu phẩy, vd: image,carousel)',
     example: 'video',
   })
+  @ApiQuery({
+    name: 'page',
+    required: false,
+    description: 'Số trang cần lấy (bắt đầu từ 1, mặc định: 1)',
+    type: Number,
+    example: 1,
+  })
+  @ApiQuery({
+    name: 'pageSize',
+    required: false,
+    description: 'Số lượng bài viết trên mỗi trang (mặc định: 10)',
+    type: Number,
+    example: 10,
+  })
   @ApiResponse({
     status: 200,
-    description: 'Danh sách các bài viết/video của kênh',
+    description: 'Danh sách các bài viết/video của kênh và thông tin phân trang',
   })
   async getChannelVideos(
     @Body() dto: InstagramChannelDto,
     @Query('type') type?: string,
+    @Query('page') page?: string,
+    @Query('pageSize') pageSize?: string,
   ) {
-    return this.instagramService.getChannelVideos(dto.username, type);
+    const parsedPage = page ? parseInt(page, 10) : 1;
+    const parsedPageSize = pageSize ? parseInt(pageSize, 10) : 10;
+    return this.instagramService.getChannelVideos(
+      dto.username,
+      type,
+      parsedPage,
+      parsedPageSize,
+    );
+  }
+
+  @Post('/channel/export')
+  @ApiOperation({ summary: 'Xuất toàn bộ bài viết/video của kênh Instagram ra file Excel' })
+  @ApiQuery({
+    name: 'type',
+    required: false,
+    description: 'Lọc loại bài viết trước khi xuất: video, image, carousel (optional)',
+    example: 'video',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Trả về tệp tin Excel (.xlsx) chứa toàn bộ bài viết đã lọc',
+  })
+  async exportChannelExcel(
+    @Body() dto: InstagramChannelDto,
+    @Res() res: Response,
+    @Query('type') type?: string,
+  ) {
+    return this.instagramService.exportChannelVideosToExcel(dto.username, res, type);
+  }
+
+  @Post('/channel/clear-cache')
+  @ApiOperation({ summary: 'Xóa toàn bộ bộ nhớ đệm (JSON) của tất cả các kênh' })
+  @ApiResponse({
+    status: 200,
+    description: 'Xóa tất cả các file cache JSON thành công',
+  })
+  async clearCache() {
+    return this.instagramService.clearAllChannelCache();
   }
 }
