@@ -1,59 +1,113 @@
-<p align="center">
-  <a href="http://nestjs.com/" target="blank"><img src="https://nestjs.com/img/logo-small.svg" width="120" alt="Nest Logo" /></a>
-</p>
+# YouTube & Media Translation API
 
-[circleci-image]: https://img.shields.io/circleci/build/github/nestjs/nest/master?token=abc123def456
-[circleci-url]: https://circleci.com/gh/nestjs/nest
+Dự án NestJS cung cấp các công cụ xử lý video, tải xuống audio/video từ YouTube, trích xuất phụ đề (Whisper SRT), dịch thuật (Gemini), thuyết minh giọng nói tiếng Việt (VieNeu-TTS) và ghép phụ đề song ngữ vào video MP4.
 
-  <p align="center">A progressive <a href="http://nodejs.org" target="_blank">Node.js</a> framework for building efficient and scalable server-side applications.</p>
-    <p align="center">
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/v/@nestjs/core.svg" alt="NPM Version" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/l/@nestjs/core.svg" alt="Package License" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/dm/@nestjs/common.svg" alt="NPM Downloads" /></a>
-<a href="https://circleci.com/gh/nestjs/nest" target="_blank"><img src="https://img.shields.io/circleci/build/github/nestjs/nest/master" alt="CircleCI" /></a>
-<a href="https://discord.gg/G7Qnnhy" target="_blank"><img src="https://img.shields.io/badge/discord-online-brightgreen.svg" alt="Discord"/></a>
-<a href="https://opencollective.com/nest#backer" target="_blank"><img src="https://opencollective.com/nest/backers/badge.svg" alt="Backers on Open Collective" /></a>
-<a href="https://opencollective.com/nest#sponsor" target="_blank"><img src="https://opencollective.com/nest/sponsors/badge.svg" alt="Sponsors on Open Collective" /></a>
-  <a href="https://paypal.me/kamilmysliwiec" target="_blank"><img src="https://img.shields.io/badge/Donate-PayPal-ff3f59.svg" alt="Donate us"/></a>
-    <a href="https://opencollective.com/nest#sponsor"  target="_blank"><img src="https://img.shields.io/badge/Support%20us-Open%20Collective-41B883.svg" alt="Support us"></a>
-  <a href="https://twitter.com/nestframework" target="_blank"><img src="https://img.shields.io/twitter/follow/nestframework.svg?style=social&label=Follow" alt="Follow us on Twitter"></a>
-</p>
-  <!--[![Backers on Open Collective](https://opencollective.com/nest/backers/badge.svg)](https://opencollective.com/nest#backer)
-  [![Sponsors on Open Collective](https://opencollective.com/nest/sponsors/badge.svg)](https://opencollective.com/nest#sponsor)-->
+---
 
-## Description
+## 🛠️ Yêu cầu Hệ thống (Prerequisites)
 
-YouTube Transcript API - A NestJS application for fetching YouTube video transcripts.
+Trước khi khởi chạy dự án, hãy đảm bảo máy tính của bạn đã cài đặt các công cụ sau:
 
-## Project setup
+1. **Node.js** (Phiên bản v18 trở lên)
+2. **Python** (Phiên bản 3.9 - 3.11 khuyến nghị cho TTS và Whisper)
+3. **FFmpeg**: Yêu cầu để xử lý, cắt ghép audio và video.
+   - **macOS**: `brew install ffmpeg`
+   - **Ubuntu/Debian**: `sudo apt update && sudo apt install ffmpeg`
+4. **Whisper CLI**: Cài đặt Whisper cục bộ để trích xuất phụ đề tự động từ giọng nói.
+   - Cài đặt qua pip: `pip install openai-whisper`
+5. **eSpeak NG**: Cần thiết cho bộ máy phonemization của VieNeu-TTS.
+   - **macOS**: `brew install espeak`
+   - **Ubuntu/Debian**: `sudo apt install espeak-ng`
 
-```bash
-$ npm install
-```
+---
 
-## Compile and run the project
+## 🚀 Hướng dẫn Cài đặt & Khởi chạy
 
-```bash
-# development
-$ npm run start
+Dự án gồm 2 phần độc lập cần chạy song song: **Python TTS Server** và **NestJS Backend**.
 
-# watch mode
-$ npm run dev
+### Bước 1: Cài đặt và chạy Python TTS Server
+1. Di chuyển vào thư mục dịch vụ TTS:
+   ```bash
+   cd python-tts-service
+   ```
+2. Tạo môi trường ảo và cài đặt thư viện phụ thuộc:
+   - **Sử dụng pip thông thường:**
+     ```bash
+     python -m venv venv
+     source venv/bin/activate  # Trên Linux/macOS
+     # Hoặc venv\Scripts\activate trên Windows (cmd)
+     pip install -r requirements.txt
+     ```
+   - **Sử dụng uv (khuyến nghị cho tốc độ nhanh):**
+     ```bash
+     uv venv
+     uv pip install -r requirements.txt
+     ```
+3. Khởi chạy máy chủ TTS:
+   ```bash
+   python server.py
+   ```
+   *Máy chủ TTS cục bộ sẽ chạy tại địa chỉ: `http://localhost:8020`*
 
-# production mode
-$ npm run start:prod
-```
+### Bước 2: Cài đặt và chạy NestJS Backend
+1. Quay lại thư mục gốc của dự án:
+   ```bash
+   cd ..
+   ```
+2. Cài đặt các package của Node.js:
+   ```bash
+   npm install
+   ```
+3. Tạo và chỉnh sửa file cấu hình `.env` ở thư mục gốc:
+   ```env
+   PORT=8000
+   NODE_ENV=development
+   
+   # Cấu hình khóa Gemini API để dịch SRT phụ đề
+   GEMINI_API_KEY=AIzaSy... (Khóa API của bạn)
+   
+   # URL kết nối tới Python TTS Server cục bộ
+   VIENEU_SERVER_URL=http://localhost:8020
+   ```
+4. Khởi chạy ứng dụng NestJS ở chế độ phát triển:
+   ```bash
+   npm run dev
+   ```
+   *Máy chủ sẽ chạy tại địa chỉ: `http://localhost:8000`*
 
-## API Documentation
+---
 
-Once the application is running, visit `http://localhost:3000/api/docs` to access the Swagger API documentation.
+## 📖 Tài liệu API (Swagger)
 
-## Available Endpoints
+Khi ứng dụng NestJS đã được khởi chạy, bạn có thể truy cập tài liệu API tự động cùng bảng thử nghiệm Swagger tại đường dẫn:
+👉 **[http://localhost:8000/api/docs](http://localhost:8000/api/docs)**
 
-- `POST /api/v1/youtube/transcript` - Get transcript from a single YouTube video
-- `POST /api/v1/youtube/transcripts` - Get transcripts from multiple YouTube videos
+---
 
-## Run tests
+## ⚡ API Dịch Video & Thuyết Minh (`POST /api/v1/media/translate-video`)
+
+API này tự động hóa toàn bộ quy trình dịch thuật video: **Tách Audio ➔ Chuyển giọng nói sang SRT gốc ➔ Dịch phụ đề sang Tiếng Việt ➔ Tạo file thuyết minh TTS ➔ Gộp phụ đề song ngữ và audio thuyết minh mới vào video MP4 gốc.**
+
+### Yêu cầu Request
+- **Endpoint:** `POST /api/v1/media/translate-video`
+- **Content-Type:** `multipart/form-data`
+- **Body parameters:**
+  - `file` (Binary File - Bắt buộc): Video đầu vào cần dịch (.mp4, .mkv, .mov,...).
+  - `voice` (String - Bắt buộc): Tên giọng đọc thuyết minh của VieNeu-TTS (Ví dụ: `Bình An`, `Ngọc Lan`, `Xuân Vĩnh`, `Mỹ Duyên`,...). Bạn có thể gọi `GET /api/v1/audio-tts/voices` để lấy danh sách giọng đọc.
+  - `apiKey` (String - Tùy chọn): Khóa Gemini API để dịch phụ đề. Nếu để trống, hệ thống sẽ sử dụng khóa mặc định từ file `.env`.
+  - `targetLanguage` (String - Tùy chọn): Ngôn ngữ đích để dịch phụ đề (Mặc định: `Vietnamese`).
+
+### Cơ chế hoạt động
+1. **Trích xuất âm thanh gốc:** Tách luồng âm thanh từ video sang định dạng MP3.
+2. **Nhận dạng giọng nói (Whisper):** Chạy Whisper trên audio đã trích xuất để tạo file phụ đề SRT gốc.
+3. **Dịch phụ đề (Gemini API):** Phân đoạn và dịch nội dung phụ đề sang Tiếng Việt thông qua mô hình Gemini 2.5 Flash tối ưu.
+4. **Hợp nhất phụ đề song ngữ:** Trộn phụ đề gốc và phụ đề đã dịch thành một tệp phụ đề song song (Dòng 1: Ngôn ngữ gốc, Dòng 2: Tiếng Việt).
+5. **Thuyết minh (TTS):** Chuyển đổi tệp phụ đề tiếng Việt thành luồng âm thanh khớp chính xác dòng thời gian của video bằng mô hình VieNeu-TTS.
+6. **Tổng hợp Video:** Sử dụng FFmpeg ghép luồng âm thanh mới (thay thế âm thanh cũ) và burn (hardsub) phụ đề song ngữ trực tiếp vào tệp MP4 kết quả.
+
+---
+
+## 🧪 Chạy thử nghiệm khác (Tests)
 
 ```bash
 # unit tests
@@ -66,42 +120,6 @@ $ npm run test:e2e
 $ npm run test:cov
 ```
 
-## Deployment
+## 📄 Bản quyền (License)
 
-When you're ready to deploy your NestJS application to production, there are some key steps you can take to ensure it runs as efficiently as possible. Check out the [deployment documentation](https://docs.nestjs.com/deployment) for more information.
-
-If you are looking for a cloud-based platform to deploy your NestJS application, check out [Mau](https://mau.nestjs.com), our official platform for deploying NestJS applications on AWS. Mau makes deployment straightforward and fast, requiring just a few simple steps:
-
-```bash
-$ npm install -g @nestjs/mau
-$ mau deploy
-```
-
-With Mau, you can deploy your application in just a few clicks, allowing you to focus on building features rather than managing infrastructure.
-
-## Resources
-
-Check out a few resources that may come in handy when working with NestJS:
-
-- Visit the [NestJS Documentation](https://docs.nestjs.com) to learn more about the framework.
-- For questions and support, please visit our [Discord channel](https://discord.gg/G7Qnnhy).
-- To dive deeper and get more hands-on experience, check out our official video [courses](https://courses.nestjs.com/).
-- Deploy your application to AWS with the help of [NestJS Mau](https://mau.nestjs.com) in just a few clicks.
-- Visualize your application graph and interact with the NestJS application in real-time using [NestJS Devtools](https://devtools.nestjs.com).
-- Need help with your project (part-time to full-time)? Check out our official [enterprise support](https://enterprise.nestjs.com).
-- To stay in the loop and get updates, follow us on [X](https://x.com/nestframework) and [LinkedIn](https://linkedin.com/company/nestjs).
-- Looking for a job, or have a job to offer? Check out our official [Jobs board](https://jobs.nestjs.com).
-
-## Support
-
-Nest is an MIT-licensed open source project. It can grow thanks to the sponsors and support by the amazing backers. If you'd like to join them, please [read more here](https://docs.nestjs.com/support).
-
-## Stay in touch
-
-- Author - [Kamil Myśliwiec](https://twitter.com/kammysliwiec)
-- Website - [https://nestjs.com](https://nestjs.com/)
-- Twitter - [@nestframework](https://twitter.com/nestframework)
-
-## License
-
-Nest is [MIT licensed](https://github.com/nestjs/nest/blob/master/LICENSE).
+Dự án được cấp phép theo tiêu chuẩn [MIT licensed](LICENSE).

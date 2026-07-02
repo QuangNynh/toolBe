@@ -20,7 +20,8 @@ async function bootstrap() {
   SwaggerModule.setup('api/docs', app, document);
 
   const port = process.env.PORT || 8000;
-  await app.listen(port);
+  const server = await app.listen(port);
+  server.setTimeout(0); // Disable socket/request timeout
   console.log(`Application is running on: http://localhost:${port}`);
   console.log(`Swagger documentation: http://localhost:${port}/api/docs`);
 }

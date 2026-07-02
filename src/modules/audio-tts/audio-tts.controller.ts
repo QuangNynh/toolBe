@@ -25,7 +25,7 @@ import * as path from 'path';
 
 import { AudioTtsService } from './audio-tts.service';
 import { GenerateTtsDto } from './dto/generate-tts.dto';
-import { GeminiVoice } from './constants/voices.constant';
+import { VieneuVoice } from './constants/voices.constant';
 
 @ApiTags('Audio TTS')
 @Controller('audio-tts')
@@ -36,13 +36,14 @@ export class AudioTtsController {
 
   @Get('voices')
   @ApiOperation({
-    summary: 'Get the list of available Gemini TTS voices',
+    summary: 'Get the list of available VieNeu-TTS voices',
   })
   @ApiResponse({
     status: 200,
-    description: 'Returns supported voice list with id, gender, and character.',
+    description:
+      'Returns supported voice list with id, label, gender, and character.',
   })
-  getVoices(): { voices: GeminiVoice[]; total: number } {
+  getVoices(): { voices: VieneuVoice[]; total: number } {
     const voices = this.audioTtsService.getAvailableVoices();
     return { voices, total: voices.length };
   }
@@ -52,7 +53,7 @@ export class AudioTtsController {
   @Post('generate')
   @ApiOperation({
     summary:
-      'Upload an SRT file and generate a timeline-accurate MP3 audio using Gemini TTS',
+      'Upload an SRT file and generate a timeline-accurate MP3 audio using VieNeu-TTS (local)',
   })
   @ApiConsumes('multipart/form-data')
   @ApiBody({
@@ -68,20 +69,8 @@ export class AudioTtsController {
         voice: {
           type: 'string',
           description:
-            'Gemini TTS voice name (e.g. Kore, Zephyr, Puck, Charon)',
-          example: 'Kore',
-        },
-        model: {
-          type: 'string',
-          description:
-            'Gemini TTS model (optional, defaults to gemini-2.5-flash-preview-tts)',
-          example: 'gemini-2.5-flash-preview-tts',
-        },
-        apiKey: {
-          type: 'string',
-          description:
-            'Gemini API Key (optional — overrides server .env key)',
-          example: 'AIzaSy...',
+            'VieNeu-TTS voice name (e.g. Bình An, Xuân Vĩnh, Ngọc Linh)',
+          example: 'Bình An',
         },
       },
     },
@@ -147,13 +136,11 @@ export class AudioTtsController {
     const outputPath = path.join(os.tmpdir(), `tts-output-${Date.now()}.mp3`);
 
     try {
-      // Run the full TTS pipeline
+      // Run the full TTS pipeline (VieNeu-TTS local)
       await this.audioTtsService.generateAudioFromSrt(
         srtContent,
         dto.voice,
         outputPath,
-        dto.model,
-        dto.apiKey,
       );
 
       // Verify the output exists

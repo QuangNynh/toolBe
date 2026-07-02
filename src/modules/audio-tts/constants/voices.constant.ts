@@ -1,45 +1,36 @@
 /**
- * Supported Gemini TTS voices for gemini-3.1-flash-tts-preview.
+ * VieNeu-TTS voice configuration.
  *
- * Each voice has a unique character/style and gender classification.
- * See: https://ai.google.dev/gemini-api/docs/text-to-speech
+ * These voices are available from the VieNeu-TTS local server.
+ * The list is fetched dynamically from the server at startup,
+ * but we keep a static fallback list for offline/initial display.
+ *
+ * See: https://github.com/pnnbao97/VieNeu-TTS
  */
-export interface GeminiVoice {
-  /** Voice identifier used in the API (e.g. 'Kore') */
+export interface VieneuVoice {
+  /** Voice identifier used in the API */
   id: string;
+  /** Human-readable voice label */
+  label: string;
   /** Gender classification */
   gender: string;
   /** Voice character / style description */
   character: string;
 }
 
-export const GEMINI_VOICES: GeminiVoice[] = [
-  { id: 'Zephyr', gender: 'Female', character: 'Bright' },
-  { id: 'Puck', gender: 'Male', character: 'Upbeat' },
-  { id: 'Charon', gender: 'Male', character: 'Informative' },
-  { id: 'Kore', gender: 'Female', character: 'Firm' },
-  { id: 'Fenrir', gender: 'Male', character: 'Excitable' },
-  { id: 'Leda', gender: 'Female', character: 'Youthful' },
-  { id: 'Orus', gender: 'Male', character: 'Firm' },
-  { id: 'Aoede', gender: 'Female', character: 'Breezy' },
-  { id: 'Callirrhoe', gender: 'Female', character: 'Easy-going' },
-  { id: 'Autonoe', gender: 'Female', character: 'Bright' },
-  { id: 'Enceladus', gender: 'Male', character: 'Breathy' },
-  { id: 'Iapetus', gender: 'Male', character: 'Clear' },
-  { id: 'Umbriel', gender: 'Male', character: 'Easy-going' },
-  { id: 'Algieba', gender: 'Male', character: 'Smooth' },
-  { id: 'Despina', gender: 'Female', character: 'Smooth' },
-  { id: 'Erinome', gender: 'Female', character: 'Clear' },
-  { id: 'Gacrux', gender: 'Male', character: 'Mature' },
-  { id: 'Laomedeia', gender: 'Female', character: 'Upbeat' },
-  { id: 'Pulcherrima', gender: 'Female', character: 'Forward' },
-  { id: 'Sulafat', gender: 'Male', character: 'Warm' },
-  { id: 'Vindemiatrix', gender: 'Female', character: 'Gentle' },
-  { id: 'Zubenelgenubi', gender: 'Male', character: 'Casual' },
-  { id: 'Achernar', gender: 'Female', character: 'Soft' },
-  { id: 'Schedar', gender: 'Male', character: 'Even' },
-  { id: 'Rasalgethi', gender: 'Male', character: 'Informative' },
-  { id: 'Sadachbia', gender: 'Male', character: 'Lively' },
-  { id: 'Sadaltager', gender: 'Male', character: 'Knowledgeable' },
-  { id: 'Sargas', gender: 'Male', character: 'Direct' },
+/**
+ * Static fallback list of VieNeu-TTS v3 Turbo preset voices.
+ * The actual list is fetched dynamically from the VieNeu-TTS server.
+ */
+export const VIENEU_DEFAULT_VOICES: VieneuVoice[] = [
+  { id: 'Ngọc Lan', label: 'Ngọc Lan', gender: 'Female', character: 'Dịu dàng' },
+  { id: 'Gia Bảo', label: 'Gia Bảo', gender: 'Male', character: 'Mượt mà' },
+  { id: 'Thái Sơn', label: 'Thái Sơn', gender: 'Male', character: 'Chắc khỏe' },
+  { id: 'Đức Trí', label: 'Đức Trí', gender: 'Male', character: 'Rõ ràng' },
+  { id: 'Mỹ Duyên', label: 'Mỹ Duyên', gender: 'Female', character: 'Mượt mà' },
+  { id: 'Trúc Ly', label: 'Trúc Ly', gender: 'Female', character: 'Trẻ trung' },
+  { id: 'Xuân Vĩnh', label: 'Xuân Vĩnh', gender: 'Male', character: 'Vui tươi' },
+  { id: 'Trọng Hữu', label: 'Trọng Hữu', gender: 'Male', character: 'Uyên bác' },
+  { id: 'Bình An', label: 'Bình An', gender: 'Male', character: 'Điềm đạm' },
+  { id: 'Ngọc Linh', label: 'Ngọc Linh', gender: 'Female', character: 'Tươi sáng' },
 ];

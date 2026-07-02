@@ -1,6 +1,6 @@
 /* eslint-disable @typescript-eslint/no-unsafe-member-access */
 /* eslint-disable @typescript-eslint/no-unsafe-assignment */
-/* eslint-disable @typescript-eslint/no-unsafe-call */
+ 
 import { BadRequestException, Injectable, OnModuleInit } from '@nestjs/common';
 import axios from 'axios';
 import { exec } from 'child_process';
@@ -98,7 +98,7 @@ export class YoutubeService implements OnModuleInit {
         usedLang = lang || 'auto';
         return { transcript, usedLang };
       } catch (err: any) {
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+         
         if (!err.message?.includes('transcript')) {
           throw err;
         }
@@ -135,7 +135,7 @@ export class YoutubeService implements OnModuleInit {
           attempts: attempt,
         };
       } catch (error) {
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
+         
         lastError = error;
 
         // Check for rate limiting
@@ -157,7 +157,7 @@ export class YoutubeService implements OnModuleInit {
       transcript: null,
       transcriptLanguage: null,
       metadata: null,
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
+       
       error: lastError?.message || 'Unknown error',
       attempts: maxRetries,
     };
@@ -652,11 +652,11 @@ export class YoutubeService implements OnModuleInit {
     res: Response,
   ): void {
     try {
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-require-imports
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
       const { basename, extname } = require('path');
 
       // Generate filename from original audio filename
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
+       
       const baseFilename = basename(
         originalFilename,
         extname(originalFilename),

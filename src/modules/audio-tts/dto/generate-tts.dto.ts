@@ -3,8 +3,9 @@ import { IsNotEmpty, IsOptional, IsString } from 'class-validator';
 
 export class GenerateTtsDto {
   @ApiProperty({
-    description: 'Voice name to use for TTS (e.g. Kore, Zephyr, Puck, Charon)',
-    example: 'Kore',
+    description:
+      'Voice name to use for TTS (e.g. Bình An, Xuân Vĩnh, Ngọc Linh)',
+    example: 'Bình An',
   })
   @IsString()
   @IsNotEmpty()
@@ -12,20 +13,17 @@ export class GenerateTtsDto {
 
   @ApiPropertyOptional({
     description:
-      'Gemini TTS model to use (defaults to gemini-2.5-flash-preview-tts)',
-    example: 'gemini-2.5-flash-preview-tts',
+      'Reference audio file path for voice cloning (optional)',
   })
   @IsOptional()
   @IsString()
-  model?: string;
+  refAudioPath?: string;
 
   @ApiPropertyOptional({
     description:
-      'Gemini API Key (optional — overrides server .env key)',
-    example: 'AIzaSy...',
+      'Transcript of reference audio for voice cloning (optional)',
   })
   @IsOptional()
   @IsString()
-  apiKey?: string;
+  refText?: string;
 }
-
