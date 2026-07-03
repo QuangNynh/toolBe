@@ -1,18 +1,25 @@
-import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { IsNotEmpty, IsOptional, IsString } from 'class-validator';
+import { ApiPropertyOptional } from '@nestjs/swagger';
+import { IsOptional, IsString } from 'class-validator';
 
 export class TranslateSrtDto {
-  @ApiProperty({
-    description: 'The target language to translate subtitles into',
+  @ApiPropertyOptional({
+    description: 'The target language to translate subtitles into (e.g. Vietnamese, French, etc.)',
     example: 'Vietnamese',
   })
-  @IsNotEmpty()
+  @IsOptional()
   @IsString()
-  targetLanguage: string;
+  targetLanguage?: string;
 
   @ApiPropertyOptional({
-    description:
-      'The Gemini model to use for translation (defaults to gemini-2.5-flash)',
+    description: 'Custom prompt/instructions for translation (e.g., "Dịch sang tiếng Việt xưng hô thân mật")',
+    example: 'Dịch sang tiếng Việt, xưng hô thân mật, giữ nguyên thuật ngữ kỹ thuật.',
+  })
+  @IsOptional()
+  @IsString()
+  customPrompt?: string;
+
+  @ApiPropertyOptional({
+    description: 'The Gemini model to use for translation (defaults to gemini-2.5-flash)',
     example: 'gemini-2.5-flash',
   })
   @IsOptional()
@@ -20,8 +27,7 @@ export class TranslateSrtDto {
   model?: string;
 
   @ApiPropertyOptional({
-    description:
-      'Gemini API Key (optional — overrides server .env key if provided)',
+    description: 'Gemini API Key (optional — overrides server .env key if provided)',
     example: 'AIzaSy...',
   })
   @IsOptional()

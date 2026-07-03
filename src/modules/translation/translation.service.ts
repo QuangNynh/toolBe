@@ -229,18 +229,56 @@ export class TranslationService implements OnModuleInit {
     return translatedText;
   }
 
+  // ─── Gemini Chat / Content Generation ─────────────────────────────────
+
+  /**
+   * General chat / content generation endpoint using Gemini.
+   */
+  async generateGeminiContent(
+    prompt: string,
+    modelName?: string,
+    apiKey?: string,
+  ): Promise<string> {
+    const model = modelName || this.DEFAULT_MODEL;
+    const client = this.getClient(apiKey);
+
+    this.logger.debug(
+      `Generating content using model ${model} for prompt length: ${prompt.length}`,
+    );
+
+    try {
+      const response = await client.models.generateContent({
+        model,
+        contents: prompt,
+      });
+
+      const result = response.text?.trim();
+      if (!result) {
+        throw new Error('Gemini returned an empty response.');
+      }
+      return result;
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      this.logger.error(`Gemini content generation failed: ${message}`, error);
+      throw new InternalServerErrorException(
+        `Gemini content generation failed: ${message}`,
+      );
+    }
+  }
+
   // ─── SRT Translation ──────────────────────────────────────────────────
 
   /**
-   * Translate an SRT file content to the target language.
+   * Translate an SRT file content to the target language or using a custom prompt.
    * Parses the SRT, splits into chunks, translates each chunk,
    * and reassembles the SRT output.
    */
   async translateSrt(
     srtContent: string,
-    targetLanguage: string,
+    targetLanguage?: string,
     modelName?: string,
     apiKey?: string,
+    customPrompt?: string,
   ): Promise<TranslateSrtResult> {
     const model = modelName || this.DEFAULT_MODEL;
     const client = this.getClient(apiKey);
@@ -253,9 +291,10 @@ export class TranslationService implements OnModuleInit {
       );
     }
 
-    this.logger.log(
-      `Translating SRT: ${blocks.length} blocks to "${targetLanguage}" using ${model}`,
-    );
+    const logMessage = customPrompt
+      ? `Translating SRT: ${blocks.length} blocks using custom prompt and ${model}`
+      : `Translating SRT: ${blocks.length} blocks to "${targetLanguage || 'Vietnamese'}" using ${model}`;
+    this.logger.log(logMessage);
 
     const chunks = this.chunkArray(blocks, this.SRT_CHUNK_SIZE);
     const translatedBlocks: SrtBlock[] = [];
@@ -275,6 +314,7 @@ export class TranslationService implements OnModuleInit {
         targetLanguage,
         model,
         client,
+        customPrompt,
       );
 
       translatedBlocks.push(...translated);
@@ -289,7 +329,7 @@ export class TranslationService implements OnModuleInit {
     return {
       translatedSrt,
       model,
-      targetLanguage,
+      targetLanguage: targetLanguage || 'Custom Prompt',
       totalBlocks: translatedBlocks.length,
       totalChunks: chunks.length,
     };
@@ -337,13 +377,21 @@ export class TranslationService implements OnModuleInit {
    */
   private async translateSrtChunk(
     blocks: SrtBlock[],
-    targetLanguage: string,
+    targetLanguage: string | undefined,
     model: string,
     client: GoogleGenAI,
+    customPrompt?: string,
   ): Promise<SrtBlock[]> {
     // Extract text lines, preserving multi-line subtitles as single entries
     const textLines = blocks.map((b) => b.text.replace(/\n/g, ' '));
-    const prompt = `Translate each of the following ${textLines.length} subtitle lines to ${targetLanguage}. Return exactly ${textLines.length} translated lines, one per line:\n\n${textLines.join('\n')}`;
+    
+    let prompt: string;
+    if (customPrompt) {
+      prompt = `${customPrompt}\n\nYou will receive ${textLines.length} subtitle lines (one per line, separated by newlines). Process/translate each line accordingly. Return exactly ${textLines.length} processed lines, one per line. Do NOT add line numbers, explanations, or any extra text. Preserve order:\n\n${textLines.join('\n')}`;
+    } else {
+      const lang = targetLanguage || 'Vietnamese';
+      prompt = `Translate each of the following ${textLines.length} subtitle lines to ${lang}. Return exactly ${textLines.length} translated lines, one per line:\n\n${textLines.join('\n')}`;
+    }
 
     return this.callWithRetry<SrtBlock[]>(
       async () => {
@@ -434,8 +482,9 @@ export class TranslationService implements OnModuleInit {
         }
 
         const delayMs = this.BASE_DELAY_MS * Math.pow(2, attempt - 1);
+        const errMsg = error instanceof Error ? error.message : String(error);
         this.logger.warn(
-          `${operationName} attempt ${attempt}/${this.MAX_RETRIES} failed (retryable). ` +
+          `${operationName} attempt ${attempt}/${this.MAX_RETRIES} failed. Error: "${errMsg}". ` +
             `Retrying in ${delayMs}ms...`,
         );
 

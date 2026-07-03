@@ -107,6 +107,20 @@ API này tự động hóa toàn bộ quy trình dịch thuật video: **Tách A
 
 ---
 
+## 💬 API Chat Gemini Trực Tiếp (`POST /api/v1/chat`)
+
+API này hoạt động như một hộp chat Gemini thông thường, không yêu cầu truyền vào ngôn ngữ đích. Hệ thống sẽ tự động trả lời bằng ngôn ngữ tương ứng với câu hỏi của bạn.
+
+### Yêu cầu Request
+- **Endpoint:** `POST /api/v1/chat`
+- **Content-Type:** `application/json`
+- **Body parameters:**
+  - `prompt` (String - Bắt buộc): Nội dung câu hỏi/câu lệnh gửi tới Gemini.
+  - `model` (String - Tùy chọn): Tên mô hình sử dụng (Mặc định: `gemini-2.5-flash`).
+  - `apiKey` (String - Tùy chọn): Khóa Gemini API Key riêng. Nếu bỏ trống sẽ dùng khóa mặc định trong `.env`.
+
+---
+
 ## 🧪 Chạy thử nghiệm khác (Tests)
 
 ```bash

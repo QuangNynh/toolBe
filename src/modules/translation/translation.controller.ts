@@ -28,6 +28,7 @@ import {
 } from './translation.service';
 import { TranslateDto } from './dto/translate.dto';
 import { TranslateSrtDto } from './dto/translate-srt.dto';
+import { GeminiChatDto } from './dto/gemini-chat.dto';
 import * as fs from 'fs';
 
 interface TranslateResponse {
@@ -193,6 +194,114 @@ export class TranslationController {
       },
     }),
   )
+  // ─── Gemini Chat ──────────────────────────────────────────────────────
+
+  @Post('chat')
+  @ApiOperation({ summary: 'Send a prompt directly to Gemini (like Gemini chat box)' })
+  @ApiResponse({
+    status: 200,
+    description: 'Returns generated content response.',
+  })
+  @ApiResponse({
+    status: 400,
+    description: 'Bad request — missing or invalid fields.',
+  })
+  @ApiResponse({
+    status: 500,
+    description: 'Content generation failed due to an internal error.',
+  })
+  async chat(
+    @Body() chatDto: GeminiChatDto,
+  ): Promise<{ response: string; model: string }> {
+    const { prompt, model, apiKey } = chatDto;
+    const usedModel = model || 'gemini-2.5-flash';
+
+    const responseText = await this.translationService.generateGeminiContent(
+      prompt,
+      model,
+      apiKey,
+    );
+
+    return {
+      response: responseText,
+      model: usedModel,
+    };
+  }
+
+  // ─── SRT Translation ──────────────────────────────────────────────────
+
+  @Post('srt')
+  @ApiOperation({
+    summary: 'Upload an SRT file, translate it, and download the translated SRT',
+  })
+  @ApiConsumes('multipart/form-data')
+  @ApiBody({
+    schema: {
+      type: 'object',
+      properties: {
+        file: {
+          type: 'string',
+          format: 'binary',
+          description: 'SRT subtitle file to translate',
+        },
+        targetLanguage: {
+          type: 'string',
+          description: 'Target language (e.g. Vietnamese, Japanese, Korean)',
+          example: 'Vietnamese',
+        },
+        customPrompt: {
+          type: 'string',
+          description: 'Custom prompt/instructions for translation (e.g., "Dịch sang tiếng Việt xưng hô thân mật")',
+          example: 'Dịch sang tiếng Việt, xưng hô thân mật, giữ nguyên thuật ngữ kỹ thuật.',
+        },
+        model: {
+          type: 'string',
+          description:
+            'Gemini model to use (optional, defaults to gemini-2.5-flash)',
+          example: 'gemini-2.5-flash',
+        },
+        apiKey: {
+          type: 'string',
+          description:
+            'Gemini API Key (optional — overrides server .env key)',
+          example: 'AIzaSy...',
+        },
+      },
+    },
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Translated SRT file download.',
+  })
+  @ApiResponse({
+    status: 400,
+    description: 'Bad request — missing file or invalid SRT format.',
+  })
+  @UseInterceptors(
+    FileInterceptor('file', {
+      storage: diskStorage({
+        destination: './uploads',
+        filename: (_req, file, cb) => {
+          const randomName = Array(32)
+            .fill(null)
+            .map(() => Math.round(Math.random() * 16).toString(16))
+            .join('');
+          cb(null, `${randomName}${extname(file.originalname)}`);
+        },
+      }),
+      fileFilter: (_req, file, cb) => {
+        const ext = extname(file.originalname).toLowerCase();
+        if (ext !== '.srt') {
+          cb(
+            new BadRequestException('Only .srt files are allowed.'),
+            false,
+          );
+          return;
+        }
+        cb(null, true);
+      },
+    }),
+  )
   async translateSrt(
     @UploadedFile() file: Express.Multer.File,
     @Body() dto: TranslateSrtDto,
@@ -219,11 +328,13 @@ export class TranslationController {
       dto.targetLanguage,
       dto.model,
       dto.apiKey,
+      dto.customPrompt,
     );
 
     // Build the output filename
     const originalName = file.originalname.replace(/\.srt$/i, '');
-    const outputFilename = `${originalName}_${dto.targetLanguage}.srt`;
+    const filenameSuffix = dto.targetLanguage || 'translated';
+    const outputFilename = `${originalName}_${filenameSuffix}.srt`;
 
     // Send as downloadable SRT file
     res.setHeader('Content-Type', 'application/x-subrip; charset=utf-8');
