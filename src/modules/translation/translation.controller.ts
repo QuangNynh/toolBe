@@ -213,13 +213,13 @@ export class TranslationController {
   async chat(
     @Body() chatDto: GeminiChatDto,
   ): Promise<{ response: string; model: string }> {
-    const { prompt, model, apiKey } = chatDto;
+    const { prompt, model, history } = chatDto;
     const usedModel = model || 'gemini-2.5-flash';
 
     const responseText = await this.translationService.generateGeminiContent(
       prompt,
       model,
-      apiKey,
+      history,
     );
 
     return {

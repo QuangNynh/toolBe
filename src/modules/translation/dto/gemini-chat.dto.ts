@@ -1,5 +1,36 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { IsNotEmpty, IsOptional, IsString } from 'class-validator';
+import {
+  IsArray,
+  IsNotEmpty,
+  IsOptional,
+  IsString,
+  ValidateNested,
+} from 'class-validator';
+import { Type } from 'class-transformer';
+
+class ChatPartDto {
+  @ApiProperty({ description: 'Text content of this part', example: 'Hello' })
+  @IsString()
+  text: string;
+}
+
+class ChatHistoryEntryDto {
+  @ApiProperty({
+    description: 'Role: "user" or "model"',
+    example: 'user',
+  })
+  @IsString()
+  role: string;
+
+  @ApiProperty({
+    description: 'Array of content parts',
+    type: [ChatPartDto],
+  })
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => ChatPartDto)
+  parts: ChatPartDto[];
+}
 
 export class GeminiChatDto {
   @ApiProperty({
@@ -19,10 +50,13 @@ export class GeminiChatDto {
   model?: string;
 
   @ApiPropertyOptional({
-    description: 'Gemini API Key (optional — overrides server .env key)',
-    example: 'AIzaSy...',
+    description:
+      'Chat history from previous turns. Format: [{ role: "user", parts: [{ text: "..." }] }, ...]',
+    type: [ChatHistoryEntryDto],
   })
   @IsOptional()
-  @IsString()
-  apiKey?: string;
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => ChatHistoryEntryDto)
+  history?: ChatHistoryEntryDto[];
 }

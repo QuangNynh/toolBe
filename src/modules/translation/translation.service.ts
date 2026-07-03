@@ -232,27 +232,47 @@ export class TranslationService implements OnModuleInit {
   // ─── Gemini Chat / Content Generation ─────────────────────────────────
 
   /**
-   * General chat / content generation endpoint using Gemini.
+   * General chat / content generation (non-streaming).
+   * Always uses the .env API key.
    */
   async generateGeminiContent(
     prompt: string,
     modelName?: string,
-    apiKey?: string,
+    history?: Array<{ role: string; parts: Array<{ text: string }> }>,
   ): Promise<string> {
     const model = modelName || this.DEFAULT_MODEL;
-    const client = this.getClient(apiKey);
+    const client = this.getDefaultClient();
 
     this.logger.debug(
-      `Generating content using model ${model} for prompt length: ${prompt.length}`,
+      `Generating content using model ${model} for prompt length: ${prompt.length} (via Stream accumulation)`,
     );
 
     try {
-      const response = await client.models.generateContent({
-        model,
-        contents: prompt,
-      });
+      let resultText = '';
 
-      const result = response.text?.trim();
+      if (history && history.length > 0) {
+        // Multi-turn chat with history using streaming under the hood
+        const chat = client.chats.create({ model, history });
+        const responseStream = await chat.sendMessageStream({ message: prompt });
+        for await (const chunk of responseStream) {
+          if (chunk.text) {
+            resultText += chunk.text;
+          }
+        }
+      } else {
+        // Single-turn content generation using streaming under the hood
+        const responseStream = await client.models.generateContentStream({
+          model,
+          contents: prompt,
+        });
+        for await (const chunk of responseStream) {
+          if (chunk.text) {
+            resultText += chunk.text;
+          }
+        }
+      }
+
+      const result = resultText.trim();
       if (!result) {
         throw new Error('Gemini returned an empty response.');
       }
@@ -264,6 +284,58 @@ export class TranslationService implements OnModuleInit {
         `Gemini content generation failed: ${message}`,
       );
     }
+  }
+
+  /**
+   * Streaming chat with Gemini via SSE (Server-Sent Events).
+   * Always uses the .env API key.
+   * Yields text chunks as they arrive from the model.
+   */
+  async *streamGeminiChat(
+    prompt: string,
+    modelName?: string,
+    history?: Array<{ role: string; parts: Array<{ text: string }> }>,
+  ): AsyncGenerator<string> {
+    const model = modelName || this.DEFAULT_MODEL;
+    const client = this.getDefaultClient();
+
+    this.logger.debug(
+      `Streaming chat using model ${model} for prompt length: ${prompt.length}`,
+    );
+
+    try {
+      const chat = client.chats.create({
+        model,
+        history: history || [],
+      });
+
+      const stream = await chat.sendMessageStream({ message: prompt });
+
+      for await (const chunk of stream) {
+        if (chunk.text) {
+          yield chunk.text;
+        }
+      }
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      this.logger.error(`Gemini streaming chat failed: ${message}`, error);
+      throw new InternalServerErrorException(
+        `Gemini streaming chat failed: ${message}`,
+      );
+    }
+  }
+
+  /**
+   * Get the default GoogleGenAI client from .env.
+   * Throws if no .env key is configured.
+   */
+  private getDefaultClient(): GoogleGenAI {
+    if (this.defaultGenAI) {
+      return this.defaultGenAI;
+    }
+    throw new BadRequestException(
+      'No GEMINI_API_KEY configured in .env. Please set the GEMINI_API_KEY environment variable.',
+    );
   }
 
   // ─── SRT Translation ──────────────────────────────────────────────────
