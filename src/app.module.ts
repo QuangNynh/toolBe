@@ -6,6 +6,7 @@ import { TranslationModule } from './modules/translation/translation.module';
 import { MediaModule } from './modules/media/media.module';
 import { AudioTtsModule } from './modules/audio-tts/audio-tts.module';
 import { InstagramModule } from './modules/instagram/instagram.module';
+import { TiktokModule } from './modules/tiktok/tiktok.module';
 
 @Module({
   imports: [
@@ -14,6 +15,7 @@ import { InstagramModule } from './modules/instagram/instagram.module';
     MediaModule,
     AudioTtsModule,
     InstagramModule,
+    TiktokModule,
   ],
   controllers: [AppController],
   providers: [AppService],

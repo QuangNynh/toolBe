@@ -121,6 +121,92 @@ API này hoạt động như một hộp chat Gemini thông thường, không y�
 
 ---
 
+## 📝 API Xuất Kịch Bản Văn Bản (`POST /api/v1/youtube/script`)
+
+API này chuyển đổi một tệp âm thanh (audio) bất kỳ thành văn bản kịch bản thuần túy (không chứa mốc thời gian hay số thứ tự dòng giống file SRT).
+
+### Yêu cầu Request
+- **Endpoint:** `POST /api/v1/youtube/script`
+- **Content-Type:** `multipart/form-data`
+- **Body parameters:**
+  - `file` (Binary File - Bắt buộc): Tệp âm thanh đầu vào (mp3, wav, m4a, etc.).
+
+### Định dạng đầu ra
+- Trả về tệp tin `.txt` chứa toàn bộ nội dung kịch bản đã được ghép nối liền mạch và tự động download.
+
+---
+
+## 🎵 API Lấy Danh Sách Video TikTok (`POST /api/v1/tiktok/channel-videos`)
+
+API này quét toàn bộ video từ một kênh TikTok thông qua công cụ `yt-dlp` và trả về thông tin chi tiết của từng video (lượt xem, lượt thích, lượt lưu, chia sẻ, thời lượng, mô tả, ảnh thu nhỏ,...).
+
+### Yêu cầu Request
+- **Endpoint:** `POST /api/v1/tiktok/channel-videos`
+- **Content-Type:** `application/json`
+- **Body parameters:**
+  - `url` (String - Bắt buộc): Đường dẫn đến kênh TikTok cần lấy (Ví dụ: `https://www.tiktok.com/@gospelglow8`).
+  - `limit` (Number - Tùy chọn): Giới hạn số lượng video mới nhất cần lấy. Nếu bỏ trống (hoặc không truyền), hệ thống sẽ quét và lấy **tất cả** video trên kênh.
+
+### Định dạng phản hồi (JSON Response)
+```json
+{
+  "channel": "gospelglow8",
+  "title": "gospelglow8",
+  "url": "https://www.tiktok.com/@gospelglow8",
+  "video_count": 3,
+  "videos": [
+    {
+      "id": "7348463423828725038",
+      "title": "✝️🙏🏻#god #christian #christiantiktok...",
+      "description": "✝️🙏🏻#god #christian #christiantiktok...",
+      "url": "https://www.tiktok.com/@gospelglow8/video/7348463423828725038",
+      "duration": 83,
+      "view_count": 47300,
+      "like_count": 7269,
+      "comment_count": 1998,
+      "repost_count": 2333,
+      "save_count": 1493,
+      "created_at": "2024-03-20T17:51:52.000Z",
+      "uploader": "gospelglow8",
+      "uploader_id": "7233415196562785322",
+      "thumbnails": [...]
+    }
+  ]
+}
+```
+
+---
+
+## 💾 API Tải Video TikTok Chất Lượng Cao Nhất (`POST /api/v1/tiktok/video`)
+
+API này tải xuống video TikTok riêng lẻ với chất lượng tốt nhất thông qua công cụ `yt-dlp` và truyền trực tiếp (stream) file MP4 về cho client tải xuống.
+
+### Yêu cầu Request
+- **Endpoint:** `POST /api/v1/tiktok/video`
+- **Content-Type:** `application/json`
+- **Body parameters:**
+  - `url` (String - Bắt buộc): Đường dẫn đến video TikTok cần tải xuống (Ví dụ: `https://www.tiktok.com/@gospelglow8/video/7348463423828725038`).
+
+### Định dạng đầu ra
+- Trả về tệp tin `.mp4` của video và tự động download với tên tệp đã được chuẩn hóa theo tiêu đề của video TikTok.
+
+---
+
+## 🎵 API Tải Audio MP3 TikTok (`POST /api/v1/tiktok/audio`)
+
+API này trích xuất âm thanh từ video TikTok với chất lượng âm thanh tốt nhất thông qua công cụ `yt-dlp` và truyền trực tiếp (stream) file MP3 về cho client tải xuống.
+
+### Yêu cầu Request
+- **Endpoint:** `POST /api/v1/tiktok/audio`
+- **Content-Type:** `application/json`
+- **Body parameters:**
+  - `url` (String - Bắt buộc): Đường dẫn đến video TikTok cần tải audio (Ví dụ: `https://www.tiktok.com/@gospelglow8/video/7348463423828725038`).
+
+### Định dạng đầu ra
+- Trả về tệp tin `.mp3` của âm thanh và tự động download với tên tệp đã được chuẩn hóa theo tiêu đề của video TikTok.
+
+---
+
 ## 🧪 Chạy thử nghiệm khác (Tests)
 
 ```bash

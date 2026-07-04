@@ -145,4 +145,51 @@ export class YoutubeController {
      
     return this.ytService.downloadSrtFile(srtContent, file.originalname, res);
   }
+
+  @Post('script')
+  @ApiOperation({ summary: 'Chuyển đổi file audio thành kịch bản văn bản (không có timeline)' })
+  @ApiConsumes('multipart/form-data')
+  @ApiBody({
+    schema: {
+      type: 'object',
+      properties: {
+        file: {
+          type: 'string',
+          format: 'binary',
+          description: 'Audio file (mp3, wav, m4a, etc.)',
+        },
+      },
+    },
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'File TXT kịch bản được download tự động',
+  })
+  @UseInterceptors(
+    FileInterceptor('file', {
+      storage: diskStorage({
+        destination: './uploads',
+        filename: (_req, file, cb) => {
+          const randomName = Array(32)
+            .fill(null)
+            .map(() => Math.round(Math.random() * 16).toString(16))
+            .join('');
+          cb(null, `${randomName}${extname(file.originalname)}`);
+        },
+      }),
+    }),
+  )
+  async uploadAudioForScript(
+    @UploadedFile() file: Express.Multer.File,
+    @Res({ passthrough: false }) res: Response,
+  ) {
+    if (!file) {
+      throw new Error('No file uploaded');
+    }
+     
+    const srtContent = await this.ytService.audioToSrt(file.path);
+    const scriptContent = this.ytService.srtToScript(srtContent);
+     
+    return this.ytService.downloadScriptFile(scriptContent, file.originalname, res);
+  }
 }

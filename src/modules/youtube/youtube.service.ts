@@ -18,6 +18,7 @@ import { fetchTranscript } from 'youtube-transcript-plus';
 import { Innertube } from 'youtubei.js';
 import type VideoInfo from 'youtubei.js/dist/src/parser/youtube/VideoInfo';
 import { ProxyService } from '../proxy/proxy.service';
+import SrtParser2 from 'srt-parser-2';
 
 const execPromise = promisify(exec);
 
@@ -618,7 +619,7 @@ export class YoutubeService implements OnModuleInit {
 
       // Run whisper
       await execPromise(
-        `whisper "${wavPath}" --model tiny --output_format srt --output_dir "${audioDir}" --fp16 False`,
+        `whisper "${wavPath}" --model turbo --output_format srt --output_dir "${audioDir}" --fp16 False`,
       );
 
       // Check file tồn tại
@@ -676,6 +677,51 @@ export class YoutubeService implements OnModuleInit {
     } catch (error) {
       throw new BadRequestException(
         `Error downloading SRT file: ${(error as Error).message}`,
+      );
+    }
+  }
+
+  srtToScript(srtContent: string): string {
+    const parser = new SrtParser2();
+    const blocks = parser.fromSrt(srtContent);
+    return blocks
+      .map((block: any) => block.text.trim())
+      .filter((text: string) => text.length > 0)
+      .join(' ')
+      .replace(/\s+/g, ' ');
+  }
+
+  /**
+   * Set headers and send the raw script content as a downloadable .txt file.
+   */
+  downloadScriptFile(
+    scriptContent: string,
+    originalFilename: string,
+    res: Response,
+  ): void {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { basename, extname } = require('path');
+
+      const baseFilename = basename(
+        originalFilename,
+        extname(originalFilename),
+      );
+      const txtFilename = `${baseFilename}.txt`;
+
+      // Set headers for download
+      res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+      res.setHeader(
+        'Content-Disposition',
+        `attachment; filename="${txtFilename}"`,
+      );
+      res.setHeader('Content-Length', Buffer.byteLength(scriptContent, 'utf-8'));
+
+      // Send the file content directly
+      res.send(scriptContent);
+    } catch (error) {
+      throw new BadRequestException(
+        `Error downloading script file: ${(error as Error).message}`,
       );
     }
   }

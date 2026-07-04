@@ -248,27 +248,20 @@ export class TranslationService implements OnModuleInit {
     );
 
     try {
-      let resultText = '';
+      const contents = [
+        ...(history || []),
+        { role: 'user', parts: [{ text: prompt }] },
+      ];
 
-      if (history && history.length > 0) {
-        // Multi-turn chat with history using streaming under the hood
-        const chat = client.chats.create({ model, history });
-        const responseStream = await chat.sendMessageStream({ message: prompt });
-        for await (const chunk of responseStream) {
-          if (chunk.text) {
-            resultText += chunk.text;
-          }
-        }
-      } else {
-        // Single-turn content generation using streaming under the hood
-        const responseStream = await client.models.generateContentStream({
-          model,
-          contents: prompt,
-        });
-        for await (const chunk of responseStream) {
-          if (chunk.text) {
-            resultText += chunk.text;
-          }
+      const responseStream = await client.models.generateContentStream({
+        model,
+        contents,
+      });
+
+      let resultText = '';
+      for await (const chunk of responseStream) {
+        if (chunk.text) {
+          resultText += chunk.text;
         }
       }
 
@@ -304,14 +297,17 @@ export class TranslationService implements OnModuleInit {
     );
 
     try {
-      const chat = client.chats.create({
+      const contents = [
+        ...(history || []),
+        { role: 'user', parts: [{ text: prompt }] },
+      ];
+
+      const responseStream = await client.models.generateContentStream({
         model,
-        history: history || [],
+        contents,
       });
 
-      const stream = await chat.sendMessageStream({ message: prompt });
-
-      for await (const chunk of stream) {
+      for await (const chunk of responseStream) {
         if (chunk.text) {
           yield chunk.text;
         }
