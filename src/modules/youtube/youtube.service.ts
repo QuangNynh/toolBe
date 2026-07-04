@@ -619,7 +619,7 @@ export class YoutubeService implements OnModuleInit {
 
       // Run whisper
       await execPromise(
-        `whisper "${wavPath}" --model turbo --output_format srt --output_dir "${audioDir}" --fp16 False`,
+        `whisper "${wavPath}" --model tiny --output_format srt --output_dir "${audioDir}" --fp16 False`,
       );
 
       // Check file tồn tại

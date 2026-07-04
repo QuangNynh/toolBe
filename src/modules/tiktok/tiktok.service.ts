@@ -220,6 +220,9 @@ export class TiktokService {
   }
 
   async downloadAudio(url: string, res: Response) {
+    let rawFile: string | null = null;
+    let finalFile: string | null = null;
+    const timestampKey = Date.now();
     try {
       this.logger.log(`Fetching metadata for TikTok audio: ${url}`);
       
@@ -246,39 +249,108 @@ export class TiktokService {
       const sanitizedTitle = this.sanitizeFilename(title).substring(0, 50) || 'tiktok_audio';
       const filename = `${sanitizedTitle}.mp3`;
 
-      // Set headers for download
-      res.setHeader('Content-Type', 'audio/mpeg');
-      res.setHeader(
-        'Content-Disposition',
-        `attachment; filename="${filename}"`,
-      );
+      // Setup temp files
+      const tempDir = os.tmpdir();
+      rawFile = path.join(tempDir, `tiktok-audio-${timestampKey}-raw`);
+      finalFile = path.join(tempDir, `tiktok-audio-${timestampKey}-final.mp3`);
 
-      // Step 2: Stream audio using yt-dlp stdout pipe
-      const subprocess = youtubeDlExec(url, {
-        extractAudio: true,
-        audioFormat: 'mp3',
-        audioQuality: 0, // best audio quality
-        format: 'bestaudio/best', // force audio-only format
-        output: '-',
+      this.logger.log(`Downloading TikTok audio from: ${url} to ${rawFile}`);
+
+      // Step 2: Download raw audio
+      await youtubeDlExec(url, {
+        format: 'bestaudio/best',
+        output: rawFile,
         noCheckCertificates: true,
         noWarnings: true,
       });
 
-      if (!subprocess.stdout) {
-        throw new BadRequestException('Could not create audio stream');
+      // yt-dlp might append extension to rawFile, let's find the downloaded file
+      const baseTempName = `tiktok-audio-${timestampKey}-raw`;
+      const files = fs.readdirSync(tempDir);
+      const downloadedFile = files.find(f => f.startsWith(baseTempName));
+      if (!downloadedFile) {
+        throw new BadRequestException('Downloaded audio file does not exist');
+      }
+      const downloadedFilePath = path.join(tempDir, downloadedFile);
+
+      this.logger.log(`Audio download complete, converting to genuine MP3...`);
+
+      // Step 3: Convert to standard MP3 using ffmpeg
+      await new Promise<void>((resolve, reject) => {
+        ffmpeg(downloadedFilePath)
+          .audioCodec('libmp3lame')
+          .audioBitrate(192) // 192kbps is standard and high quality
+          .save(finalFile as string)
+          .on('end', () => resolve())
+          .on('error', (err: Error) => reject(err));
+      });
+
+      // Delete raw downloaded file
+      try {
+        fs.unlinkSync(downloadedFilePath);
+      } catch {
+        // Ignore
       }
 
-      subprocess.stdout.pipe(res);
+      if (!fs.existsSync(finalFile)) {
+        throw new BadRequestException('Converted audio file does not exist');
+      }
 
-      if (subprocess.stderr) {
-        subprocess.stderr.on('data', (err) => {
-          this.logger.error(`yt-dlp stderr: ${err.toString()}`);
+      this.logger.log(`Conversion complete, streaming ${filename} to client...`);
+
+      // Get file stats
+      const stat = fs.statSync(finalFile);
+      const fileSize = stat.size;
+
+      // Set headers for download
+      res.setHeader('Content-Type', 'audio/mpeg');
+      res.setHeader('Content-Length', fileSize.toString());
+      res.setHeader(
+        'Content-Disposition',
+        `attachment; filename="${filename}"`,
+      );
+      res.setHeader('Accept-Ranges', 'bytes');
+
+      // Stream the file
+      const stream = fs.createReadStream(finalFile);
+      stream.pipe(res);
+
+      // Cleanup after streaming completes
+      const targetFile = finalFile;
+      res.on('finish', () => {
+        fs.unlink(targetFile, (err) => {
+          if (err) console.error('Cleanup error:', err);
         });
-      }
+      });
+
+      // Cleanup on error
+      stream.on('error', (error) => {
+        console.error('Stream error:', error);
+        fs.unlink(targetFile, () => {});
+      });
+
     } catch (error: any) {
+      // Clean up any remaining temp files on error
+      const baseTempName = `tiktok-audio-${timestampKey}-raw`;
+      try {
+        const files = fs.readdirSync(os.tmpdir());
+        const downloadedFile = files.find(f => f.startsWith(baseTempName));
+        if (downloadedFile) {
+          fs.unlinkSync(path.join(os.tmpdir(), downloadedFile));
+        }
+      } catch {
+        // Ignore
+      }
+      if (finalFile && fs.existsSync(finalFile)) {
+        try {
+          fs.unlinkSync(finalFile);
+        } catch {
+          // Ignore
+        }
+      }
       const msg = error.message || String(error);
-      this.logger.error(`Failed to stream TikTok audio: ${msg}`, error);
-      throw new BadRequestException(`Failed to stream TikTok audio: ${msg}`);
+      this.logger.error(`Failed to download TikTok audio: ${msg}`, error);
+      throw new BadRequestException(`Failed to download TikTok audio: ${msg}`);
     }
   }
 
