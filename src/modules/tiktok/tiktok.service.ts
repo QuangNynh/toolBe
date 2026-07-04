@@ -8,6 +8,11 @@ import { Response } from 'express';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
+import * as ffmpeg from 'fluent-ffmpeg';
+import * as ffmpegInstaller from '@ffmpeg-installer/ffmpeg';
+
+// Set FFmpeg binary path from the bundled installer
+ffmpeg.setFfmpegPath(ffmpegInstaller.path);
 
 @Injectable()
 export class TiktokService {
@@ -82,6 +87,7 @@ export class TiktokService {
 
   async downloadVideo(url: string, res: Response) {
     let rawFile: string | null = null;
+    let finalFile: string | null = null;
     try {
       this.logger.log(`Fetching metadata for TikTok video: ${url}`);
       
@@ -108,9 +114,10 @@ export class TiktokService {
       const sanitizedTitle = this.sanitizeFilename(title).substring(0, 50) || 'tiktok_video';
       const filename = `${sanitizedTitle}.mp4`;
 
-      // Setup temp file
+      // Setup temp files
       const tempDir = os.tmpdir();
-      rawFile = path.join(tempDir, `tiktok-${Date.now()}.mp4`);
+      rawFile = path.join(tempDir, `tiktok-${Date.now()}-raw.mp4`);
+      finalFile = path.join(tempDir, `tiktok-${Date.now()}-final.mp4`);
 
       this.logger.log(`Downloading TikTok video from: ${url} to ${rawFile}`);
 
@@ -126,10 +133,42 @@ export class TiktokService {
         throw new BadRequestException('Downloaded file does not exist');
       }
 
-      this.logger.log(`Download complete, streaming ${filename} to client...`);
+      this.logger.log(`Download complete, re-encoding for compatibility...`);
+
+      // Step 3: Re-encode with ffmpeg for CapCut/Media Player compatibility
+      const inputPath = rawFile;
+      const outputPath = finalFile;
+      await new Promise<void>((resolve, reject) => {
+        ffmpeg(inputPath)
+          .videoCodec('libx264')
+          .audioCodec('aac')
+          .outputOptions([
+            '-movflags +faststart', // Enable fast start
+            '-preset fast', // Fast encoding
+            '-crf 23', // Quality (lower = better, 23 is good)
+            '-pix_fmt yuv420p', // Pixel format for maximum player compatibility
+          ])
+          .save(outputPath)
+          .on('end', () => resolve())
+          .on('error', (err: Error) => reject(err));
+      });
+
+      // Delete raw file
+      try {
+        fs.unlinkSync(rawFile);
+      } catch {
+        // Ignore
+      }
+      rawFile = null;
+
+      if (!fs.existsSync(finalFile)) {
+        throw new BadRequestException('Processed file does not exist');
+      }
+
+      this.logger.log(`Re-encoding complete, streaming ${filename} to client...`);
 
       // Get file stats
-      const stat = fs.statSync(rawFile);
+      const stat = fs.statSync(finalFile);
       const fileSize = stat.size;
 
       // Set headers for download
@@ -142,11 +181,11 @@ export class TiktokService {
       res.setHeader('Accept-Ranges', 'bytes');
 
       // Stream the file
-      const stream = fs.createReadStream(rawFile);
+      const stream = fs.createReadStream(finalFile);
       stream.pipe(res);
 
       // Cleanup after streaming completes
-      const targetFile = rawFile;
+      const targetFile = finalFile;
       res.on('finish', () => {
         fs.unlink(targetFile, (err) => {
           if (err) console.error('Cleanup error:', err);
@@ -163,6 +202,13 @@ export class TiktokService {
       if (rawFile && fs.existsSync(rawFile)) {
         try {
           fs.unlinkSync(rawFile);
+        } catch {
+          // Ignore cleanup errors
+        }
+      }
+      if (finalFile && fs.existsSync(finalFile)) {
+        try {
+          fs.unlinkSync(finalFile);
         } catch {
           // Ignore cleanup errors
         }
