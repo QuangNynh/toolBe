@@ -7,6 +7,7 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { GoogleGenAI } from '@google/genai';
+import axios from 'axios';
 
 /** Represents a single SRT subtitle block */
 interface SrtBlock {
@@ -184,6 +185,185 @@ export class TranslationService implements OnModuleInit {
     }
   }
 
+  /**
+   * List all supported models from 9Router.
+   */
+  async list9RouterModels(): Promise<any> {
+    const apiKey = this.configService.get<string>('API_KEY_9ROUTER');
+    if (!apiKey) {
+      throw new BadRequestException(
+        'API_KEY_9ROUTER is not configured in .env.',
+      );
+    }
+
+    const baseUrl =
+      this.configService.get<string>('BASE_URL_9ROUTER') ||
+      'http://localhost:20128/v1';
+
+    try {
+      this.logger.debug(`Fetching 9Router models from ${baseUrl}/models`);
+      const response = await axios.get(`${baseUrl}/models`, {
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+        },
+      });
+      return response.data;
+    } catch (error: any) {
+      const message =
+        error.response?.data?.error?.message ||
+        error.message ||
+        'Unknown error occurred';
+      this.logger.error(
+        `Failed to list 9Router models: ${message}`,
+        error.stack,
+      );
+      throw new InternalServerErrorException(
+        `Failed to fetch models from 9Router: ${message}`,
+      );
+    }
+  }
+
+  /**
+   * Send a chat prompt or history to 9Router.
+   */
+  async chatWith9Router(
+    model: string,
+    messages: Array<{ role: string; content: string }>,
+  ): Promise<any> {
+    const apiKey = this.configService.get<string>('API_KEY_9ROUTER');
+    if (!apiKey) {
+      throw new BadRequestException(
+        'API_KEY_9ROUTER is not configured in .env.',
+      );
+    }
+
+    const baseUrl =
+      this.configService.get<string>('BASE_URL_9ROUTER') ||
+      'http://localhost:20128/v1';
+
+    try {
+      this.logger.debug(
+        `Sending 9Router chat request to ${baseUrl}/chat/completions`,
+      );
+      const response = await axios.post(
+        `${baseUrl}/chat/completions`,
+        {
+          model,
+          messages,
+          stream: false,
+        },
+        {
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            'Content-Type': 'application/json',
+          },
+        },
+      );
+      return response.data;
+    } catch (error: any) {
+      const message =
+        error.response?.data?.error?.message ||
+        error.message ||
+        'Unknown error occurred';
+      this.logger.error(`9Router chat failed: ${message}`, error.stack);
+      throw new InternalServerErrorException(
+        `Failed to complete chat via 9Router: ${message}`,
+      );
+    }
+  }
+
+  /**
+   * Stream a chat session with 9Router using SSE.
+   */
+  async *stream9RouterChat(
+    model: string,
+    messages: Array<{ role: string; content: string }>,
+  ): AsyncGenerator<string> {
+    const apiKey = this.configService.get<string>('API_KEY_9ROUTER');
+    if (!apiKey) {
+      throw new BadRequestException(
+        'API_KEY_9ROUTER is not configured in .env.',
+      );
+    }
+
+    const baseUrl =
+      this.configService.get<string>('BASE_URL_9ROUTER') ||
+      'http://localhost:20128/v1';
+
+    this.logger.debug(`Streaming 9Router chat using model ${model}`);
+
+    let response;
+    try {
+      response = await axios.post(
+        `${baseUrl}/chat/completions`,
+        {
+          model,
+          messages,
+          stream: true,
+        },
+        {
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            'Content-Type': 'application/json',
+          },
+          responseType: 'stream',
+        },
+      );
+    } catch (error: any) {
+      const message = error.message || 'Unknown error occurred';
+      this.logger.error(`9Router streaming request failed: ${message}`, error);
+      throw new InternalServerErrorException(
+        `Failed to start 9Router stream: ${message}`,
+      );
+    }
+
+    const stream = response.data;
+    let buffer = '';
+
+    for await (const chunk of stream) {
+      const text = chunk.toString('utf8');
+      buffer += text;
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        if (trimmed === 'data: [DONE]') {
+          return;
+        }
+        if (trimmed.startsWith('data: ')) {
+          const dataStr = trimmed.slice(6);
+          try {
+            const parsed = JSON.parse(dataStr);
+            const content = parsed.choices?.[0]?.delta?.content;
+            if (content) {
+              yield content;
+            }
+          } catch (e) {
+            // Ignore incomplete line parse errors
+          }
+        }
+      }
+    }
+
+    if (buffer) {
+      const trimmed = buffer.trim();
+      if (trimmed.startsWith('data: ') && trimmed !== 'data: [DONE]') {
+        const dataStr = trimmed.slice(6);
+        try {
+          const parsed = JSON.parse(dataStr);
+          const content = parsed.choices?.[0]?.delta?.content;
+          if (content) {
+            yield content;
+          }
+        } catch (e) {
+          // Ignore
+        }
+      }
+    }
+  }
+
   // ─── Text Translation ─────────────────────────────────────────────────
 
   /**
@@ -195,6 +375,13 @@ export class TranslationService implements OnModuleInit {
     modelName?: string,
     apiKey?: string,
   ): Promise<string> {
+    if (!text) {
+      throw new BadRequestException('Text is required.');
+    }
+    if (!targetLanguage) {
+      throw new BadRequestException('Target language is required.');
+    }
+
     const model = modelName || this.DEFAULT_MODEL;
     const client = this.getClient(apiKey);
 
@@ -240,6 +427,10 @@ export class TranslationService implements OnModuleInit {
     modelName?: string,
     history?: Array<{ role: string; parts: Array<{ text: string }> }>,
   ): Promise<string> {
+    if (!prompt) {
+      throw new BadRequestException('Prompt is required.');
+    }
+
     const model = modelName || this.DEFAULT_MODEL;
     const client = this.getDefaultClient();
 
@@ -289,6 +480,10 @@ export class TranslationService implements OnModuleInit {
     modelName?: string,
     history?: Array<{ role: string; parts: Array<{ text: string }> }>,
   ): AsyncGenerator<string> {
+    if (!prompt) {
+      throw new BadRequestException('Prompt is required.');
+    }
+
     const model = modelName || this.DEFAULT_MODEL;
     const client = this.getDefaultClient();
 
@@ -348,6 +543,10 @@ export class TranslationService implements OnModuleInit {
     apiKey?: string,
     customPrompt?: string,
   ): Promise<TranslateSrtResult> {
+    if (!srtContent) {
+      throw new BadRequestException('SRT content is required.');
+    }
+
     const model = modelName || this.DEFAULT_MODEL;
     const client = this.getClient(apiKey);
 
@@ -397,6 +596,75 @@ export class TranslationService implements OnModuleInit {
     return {
       translatedSrt,
       model,
+      targetLanguage: targetLanguage || 'Custom Prompt',
+      totalBlocks: translatedBlocks.length,
+      totalChunks: chunks.length,
+    };
+  }
+
+  /**
+   * Translate an SRT file content via 9Router.
+   * Splits the content into chunks, translates each chunk, and reassembles the SRT output.
+   */
+  async translateSrtWith9Router(
+    srtContent: string,
+    modelName: string,
+    targetLanguage?: string,
+    customPrompt?: string,
+    apiKeyOverride?: string,
+  ): Promise<TranslateSrtResult> {
+    if (!srtContent) {
+      throw new BadRequestException('SRT content is required.');
+    }
+    if (!modelName) {
+      throw new BadRequestException('Model name is required.');
+    }
+
+    const blocks = this.parseSrt(srtContent);
+
+    if (blocks.length === 0) {
+      throw new BadRequestException(
+        'No valid SRT blocks found in the uploaded file.',
+      );
+    }
+
+    const logMessage = customPrompt
+      ? `Translating SRT via 9Router: ${blocks.length} blocks using custom prompt and ${modelName}`
+      : `Translating SRT via 9Router: ${blocks.length} blocks to "${targetLanguage || 'Vietnamese'}" using ${modelName}`;
+    this.logger.log(logMessage);
+
+    const chunks = this.chunkArray(blocks, this.SRT_CHUNK_SIZE);
+    const translatedBlocks: SrtBlock[] = [];
+
+    for (let i = 0; i < chunks.length; i++) {
+      this.logger.debug(
+        `Translating chunk ${i + 1}/${chunks.length} (${chunks[i].length} blocks) via 9Router`,
+      );
+
+      // Add delay between chunks to avoid rate limiting (skip for first chunk)
+      if (i > 0) {
+        await this.delay(this.CHUNK_DELAY_MS);
+      }
+
+      const translated = await this.translateSrtChunkWith9Router(
+        chunks[i],
+        targetLanguage,
+        modelName,
+        customPrompt,
+        apiKeyOverride,
+      );
+      translatedBlocks.push(...translated);
+    }
+
+    const translatedSrt = this.assembleSrt(translatedBlocks);
+
+    this.logger.log(
+      `SRT translation via 9Router completed: ${translatedBlocks.length} blocks in ${chunks.length} chunks`,
+    );
+
+    return {
+      translatedSrt,
+      model: modelName,
       targetLanguage: targetLanguage || 'Custom Prompt',
       totalBlocks: translatedBlocks.length,
       totalChunks: chunks.length,
@@ -494,6 +762,82 @@ export class TranslationService implements OnModuleInit {
         }));
       },
       'SRT chunk translation',
+    );
+  }
+
+  /**
+   * Translate a chunk of SRT blocks using 9Router and map results back.
+   */
+  private async translateSrtChunkWith9Router(
+    blocks: SrtBlock[],
+    targetLanguage: string | undefined,
+    model: string,
+    customPrompt?: string,
+    apiKeyOverride?: string,
+  ): Promise<SrtBlock[]> {
+    const textLines = blocks.map((b) => b.text.replace(/\n/g, ' '));
+
+    let prompt: string;
+    if (customPrompt) {
+      prompt = `${customPrompt}\n\nYou will receive ${textLines.length} subtitle lines (one per line, separated by newlines). Process/translate each line accordingly. Return exactly ${textLines.length} processed lines, one per line. Do NOT add line numbers, explanations, or any extra text. Preserve order:\n\n${textLines.join('\n')}`;
+    } else {
+      const lang = targetLanguage || 'Vietnamese';
+      prompt = `Translate each of the following ${textLines.length} subtitle lines to ${lang}. Return exactly ${textLines.length} translated lines, one per line:\n\n${textLines.join('\n')}`;
+    }
+
+    const apiKey = apiKeyOverride || this.configService.get<string>('API_KEY_9ROUTER');
+    if (!apiKey) {
+      throw new BadRequestException(
+        'APIKey 9Router is not configured or provided.',
+      );
+    }
+
+    const baseUrl =
+      this.configService.get<string>('BASE_URL_9ROUTER') ||
+      'http://localhost:20128/v1';
+
+    return this.callWithRetry<SrtBlock[]>(
+      async () => {
+        const response = await axios.post(
+          `${baseUrl}/chat/completions`,
+          {
+            model,
+            messages: [
+              { role: 'system', content: this.SRT_SYSTEM_INSTRUCTION },
+              { role: 'user', content: prompt },
+            ],
+            stream: false,
+            temperature: 0.3,
+          },
+          {
+            headers: {
+              Authorization: `Bearer ${apiKey}`,
+              'Content-Type': 'application/json',
+            },
+          },
+        );
+
+        const resultText = response.data?.choices?.[0]?.message?.content?.trim();
+
+        if (!resultText) {
+          throw new Error('9Router returned an empty response for SRT chunk.');
+        }
+
+        const translatedLines = resultText.split('\n').filter((l: string) => l.trim());
+
+        if (translatedLines.length !== blocks.length) {
+          this.logger.warn(
+            `Line count mismatch via 9Router: expected ${blocks.length}, got ${translatedLines.length}. Using best-effort mapping.`,
+          );
+        }
+
+        return blocks.map((block, i) => ({
+          index: block.index,
+          timestamp: block.timestamp,
+          text: translatedLines[i] ?? block.text,
+        }));
+      },
+      '9Router SRT chunk translation',
     );
   }
 

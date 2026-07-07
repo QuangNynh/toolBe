@@ -209,6 +209,69 @@ export class YoutubeService implements OnModuleInit {
     ); // Limit length and provide fallback
   }
 
+  async getVideoFilename(url: string, suffix: string = ''): Promise<string> {
+    try {
+      let videoId: string;
+      if (url.includes('v=')) {
+        videoId = url.split('v=')[1].split('&')[0];
+      } else {
+        const parts = url.split('/');
+        videoId = parts[parts.length - 1] || '';
+      }
+      if (videoId) {
+        const info = await this.youtube.getInfo(videoId);
+        const title = info.basic_info.title || 'video';
+        return `${this.sanitizeFilename(title)}${suffix}.mp4`;
+      }
+    } catch {
+      // Fallback
+    }
+    return `video${suffix}.mp4`;
+  }
+
+  async downloadVideoToPath(
+    url: string,
+    quality: string = '1080p',
+  ): Promise<string> {
+    // Build format string based on quality
+    let formatString: string;
+    switch (quality) {
+      case '2160p':
+      case '4k':
+        formatString = 'bestvideo[height<=2160]+bestaudio/best[height<=2160]';
+        break;
+      case '1440p':
+        formatString = 'bestvideo[height<=1440]+bestaudio/best[height<=1440]';
+        break;
+      case '1080p':
+        formatString = 'bestvideo[height<=1080]+bestaudio/best[height<=1080]';
+        break;
+      case '720p':
+        formatString = 'bestvideo[height<=720]+bestaudio/best[height<=720]';
+        break;
+      case '480p':
+        formatString = 'bestvideo[height<=480]+bestaudio/best[height<=480]';
+        break;
+      case '360p':
+        formatString = 'bestvideo[height<=360]+bestaudio/best[height<=360]';
+        break;
+      default:
+        formatString = 'bestvideo+bestaudio/best';
+    }
+
+    const tempDir = os.tmpdir();
+    const baseName = `yt-${Date.now()}`;
+    const rawFile = path.join(tempDir, `${baseName}-raw.mp4`);
+
+    console.log(`Downloading video for local processing with quality: ${quality}`);
+
+    const cmd = `yt-dlp -f "${formatString}" --merge-output-format mp4 -o "${rawFile}" --no-check-certificates --no-warnings --add-header "referer:youtube.com" --add-header "user-agent:googlebot" "${url}"`;
+    console.log(`Executing: ${cmd}`);
+    await execPromise(cmd);
+
+    return rawFile;
+  }
+
   async streamAudio(url: string, res: Response) {
     try {
       // Extract video ID to get metadata
@@ -269,7 +332,7 @@ export class YoutubeService implements OnModuleInit {
 
   async downloadProcessAndStream(
     url: string,
-    quality: string = 'best',
+    quality: string = '1080p',
     res: Response,
   ) {
     let rawFile: string | null = null;
@@ -332,15 +395,10 @@ export class YoutubeService implements OnModuleInit {
 
       console.log(`Downloading video: ${filename} with quality: ${quality}`);
 
-      // Step 1: Download video
-      await youtubeDlExec(url, {
-        format: formatString,
-        mergeOutputFormat: 'mp4',
-        output: rawFile,
-        noCheckCertificates: true,
-        noWarnings: true,
-        addHeader: ['referer:youtube.com', 'user-agent:googlebot'],
-      });
+      // Step 1: Download video using system's yt-dlp binary
+      const cmd = `yt-dlp -f "${formatString}" --merge-output-format mp4 -o "${rawFile}" --no-check-certificates --no-warnings --add-header "referer:youtube.com" --add-header "user-agent:googlebot" "${url}"`;
+      console.log(`Executing: ${cmd}`);
+      await execPromise(cmd);
 
       console.log(`Download complete, re-encoding for compatibility...`);
 

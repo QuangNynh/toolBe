@@ -22,6 +22,7 @@ import * as fs from 'fs';
 import { MediaService } from './media.service';
 import { ExtractAudioDto } from './dto/extract-audio.dto';
 import { TranslateVideoDto } from './dto/translate-video.dto';
+import { TranslateYoutubeVideoDto } from './dto/translate-youtube-video.dto';
 
 const ALLOWED_VIDEO_EXTS = [
   '.mp4',
@@ -192,8 +193,13 @@ export class MediaController {
         },
         apiKey: {
           type: 'string',
-          description: 'Gemini API key (optional — overrides default .env key)',
-          example: 'AIzaSy...',
+          description: '9Router API key (optional — overrides default .env key)',
+          example: 'sk-...',
+        },
+        model: {
+          type: 'string',
+          description: 'The 9Router model to use for translation (optional, defaults to ag/gemini-3-flash-agent)',
+          example: 'ag/gemini-3-flash-agent',
         },
         targetLanguage: {
           type: 'string',
@@ -259,6 +265,7 @@ export class MediaController {
     const voice = dto.voice;
     const apiKey = dto.apiKey;
     const targetLanguage = dto.targetLanguage || 'Vietnamese';
+    const model = dto.model || 'ag/gemini-3-flash-agent';
 
     try {
       const { outputPath, outputFilename } =
@@ -267,6 +274,7 @@ export class MediaController {
           voice,
           apiKey,
           targetLanguage,
+          model,
         );
 
       // Get file size for Content-Length header
@@ -305,6 +313,75 @@ export class MediaController {
       if (fs.existsSync(file.path)) {
         fs.unlinkSync(file.path);
       }
+      throw error;
+    }
+  }
+
+  @Post('translate-youtube-video')
+  @ApiOperation({
+    summary: 'Translate a YouTube video: download, transcribe, translate audio track, and stream the translated video',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Translated video file download.',
+  })
+  @ApiResponse({
+    status: 400,
+    description: 'Bad request — validation or translation failed.',
+  })
+  async translateYoutubeVideo(
+    @Body() dto: TranslateYoutubeVideoDto,
+    @Res({ passthrough: false }) res: Response,
+  ): Promise<void> {
+    // Disable request timeout for this heavy connection
+    if (res.req) {
+      res.req.setTimeout(0);
+    }
+
+    const { url, voice, apiKey, targetLanguage, model, quality } = dto;
+    const resolvedLanguage = targetLanguage || 'Vietnamese';
+    const resolvedModel = model || 'ag/gemini-3-flash-agent';
+    const resolvedQuality = quality || '1080p';
+
+    try {
+      const { outputPath, outputFilename } =
+        await this.mediaService.translateYoutubeVideo(
+          url,
+          voice,
+          apiKey,
+          resolvedLanguage,
+          resolvedModel,
+          resolvedQuality,
+        );
+
+      // Get file size for Content-Length header
+      const stat = fs.statSync(outputPath);
+
+      // Set response headers
+      res.setHeader('Content-Type', 'video/mp4');
+      res.setHeader('Content-Length', stat.size.toString());
+      res.setHeader(
+        'Content-Disposition',
+        `attachment; filename="${encodeURIComponent(outputFilename)}"`,
+      );
+
+      // Stream the video file to the client
+      const stream = fs.createReadStream(outputPath);
+      stream.pipe(res);
+
+      // Cleanup output file after streaming
+      res.on('finish', () => {
+        if (fs.existsSync(outputPath)) {
+          fs.unlinkSync(outputPath);
+        }
+      });
+
+      stream.on('error', () => {
+        if (fs.existsSync(outputPath)) {
+          fs.unlinkSync(outputPath);
+        }
+      });
+    } catch (error) {
       throw error;
     }
   }

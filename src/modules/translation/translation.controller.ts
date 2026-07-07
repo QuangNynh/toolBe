@@ -29,6 +29,8 @@ import {
 import { TranslateDto } from './dto/translate.dto';
 import { TranslateSrtDto } from './dto/translate-srt.dto';
 import { GeminiChatDto } from './dto/gemini-chat.dto';
+import { NineRouterChatDto } from './dto/ninerouter-chat.dto';
+import { NineRouterTranslateSrtDto } from './dto/nine-router-translate-srt.dto';
 import * as fs from 'fs';
 
 interface TranslateResponse {
@@ -60,6 +62,16 @@ export class TranslationController {
   ): Promise<{ models: ModelListItem[]; total: number }> {
     const models = await this.translationService.listModels(apiKey);
     return { models, total: models.length };
+  }
+
+  @Get('9router/models')
+  @ApiOperation({ summary: 'List all supported models from 9Router' })
+  @ApiResponse({
+    status: 200,
+    description: 'Returns list of all available models from 9Router.',
+  })
+  async list9RouterModels(): Promise<any> {
+    return this.translationService.list9RouterModels();
   }
 
   @Get('model-info')
@@ -124,76 +136,7 @@ export class TranslationController {
     };
   }
 
-  // ─── SRT Translation ──────────────────────────────────────────────────
 
-  @Post('srt')
-  @ApiOperation({
-    summary: 'Upload an SRT file, translate it, and download the translated SRT',
-  })
-  @ApiConsumes('multipart/form-data')
-  @ApiBody({
-    schema: {
-      type: 'object',
-      required: ['file', 'targetLanguage'],
-      properties: {
-        file: {
-          type: 'string',
-          format: 'binary',
-          description: 'SRT subtitle file to translate',
-        },
-        targetLanguage: {
-          type: 'string',
-          description: 'Target language (e.g. Vietnamese, Japanese, Korean)',
-          example: 'Vietnamese',
-        },
-        model: {
-          type: 'string',
-          description:
-            'Gemini model to use (optional, defaults to gemini-2.5-flash)',
-          example: 'gemini-2.5-flash',
-        },
-        apiKey: {
-          type: 'string',
-          description:
-            'Gemini API Key (optional — overrides server .env key)',
-          example: 'AIzaSy...',
-        },
-      },
-    },
-  })
-  @ApiResponse({
-    status: 200,
-    description: 'Translated SRT file download.',
-  })
-  @ApiResponse({
-    status: 400,
-    description: 'Bad request — missing file or invalid SRT format.',
-  })
-  @UseInterceptors(
-    FileInterceptor('file', {
-      storage: diskStorage({
-        destination: './uploads',
-        filename: (_req, file, cb) => {
-          const randomName = Array(32)
-            .fill(null)
-            .map(() => Math.round(Math.random() * 16).toString(16))
-            .join('');
-          cb(null, `${randomName}${extname(file.originalname)}`);
-        },
-      }),
-      fileFilter: (_req, file, cb) => {
-        const ext = extname(file.originalname).toLowerCase();
-        if (ext !== '.srt') {
-          cb(
-            new BadRequestException('Only .srt files are allowed.'),
-            false,
-          );
-          return;
-        }
-        cb(null, true);
-      },
-    }),
-  )
   // ─── Gemini Chat ──────────────────────────────────────────────────────
 
   @Post('chat')
@@ -226,6 +169,65 @@ export class TranslationController {
       response: responseText,
       model: usedModel,
     };
+  }
+
+  @Post('9router/chat')
+  @ApiOperation({
+    summary: 'Send a prompt or chat history to 9Router, optionally streaming the response',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Returns the JSON response from 9Router, or a Server-Sent Events stream if stream: true.',
+  })
+  async chatWith9Router(
+    @Body() chatDto: NineRouterChatDto,
+    @Res() res: Response,
+  ): Promise<void> {
+    const { model, messages, stream } = chatDto;
+
+    if (stream) {
+      // Set SSE headers
+      res.setHeader('Content-Type', 'text/event-stream');
+      res.setHeader('Cache-Control', 'no-cache');
+      res.setHeader('Connection', 'keep-alive');
+      res.setHeader('X-Accel-Buffering', 'no');
+      res.req.setTimeout(0);
+
+      try {
+        const streamGenerator = this.translationService.stream9RouterChat(
+          model,
+          messages,
+        );
+
+        for await (const textChunk of streamGenerator) {
+          res.write(`data: ${JSON.stringify({ text: textChunk })}\n\n`);
+        }
+
+        res.write('data: [DONE]\n\n');
+        res.end();
+      } catch (error: unknown) {
+        const message =
+          error instanceof Error ? error.message : 'Internal Server Error';
+        if (!res.headersSent) {
+          res.status(500).json({ error: 'Internal Server Error', details: message });
+        } else {
+          res.write(`data: ${JSON.stringify({ error: message })}\n\n`);
+          res.end();
+        }
+      }
+    } else {
+      try {
+        const responseData = await this.translationService.chatWith9Router(
+          model,
+          messages,
+        );
+        res.status(200).json(responseData);
+      } catch (error: unknown) {
+        const message =
+          error instanceof Error ? error.message : 'Internal Server Error';
+        res.status(500).json({ error: 'Internal Server Error', details: message });
+      }
+    }
   }
 
   // ─── SRT Translation ──────────────────────────────────────────────────
@@ -329,6 +331,123 @@ export class TranslationController {
       dto.model,
       dto.apiKey,
       dto.customPrompt,
+    );
+
+    // Build the output filename
+    const originalName = file.originalname.replace(/\.srt$/i, '');
+    const filenameSuffix = dto.targetLanguage || 'translated';
+    const outputFilename = `${originalName}_${filenameSuffix}.srt`;
+
+    // Send as downloadable SRT file
+    res.setHeader('Content-Type', 'application/x-subrip; charset=utf-8');
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="${encodeURIComponent(outputFilename)}"`,
+    );
+    res.setHeader('X-Translation-Model', result.model);
+    res.setHeader('X-Total-Blocks', String(result.totalBlocks));
+    res.setHeader('X-Total-Chunks', String(result.totalChunks));
+    res.send(result.translatedSrt);
+  }
+
+  @Post('9router/srt')
+  @ApiOperation({
+    summary: 'Upload an SRT file, translate it via 9Router, and download the translated SRT',
+  })
+  @ApiConsumes('multipart/form-data')
+  @ApiBody({
+    schema: {
+      type: 'object',
+      required: ['file', 'model'],
+      properties: {
+        file: {
+          type: 'string',
+          format: 'binary',
+          description: 'SRT subtitle file to translate',
+        },
+        model: {
+          type: 'string',
+          description: 'The 9Router model to use for translation',
+          example: 'ag/gemini-2.5-flash',
+        },
+        targetLanguage: {
+          type: 'string',
+          description: 'Target language (optional, e.g. Vietnamese, Japanese, Korean)',
+          example: 'Vietnamese',
+        },
+        customPrompt: {
+          type: 'string',
+          description: 'Custom prompt/instructions for translation (optional)',
+          example: 'Dịch sang tiếng Việt, xưng hô thân mật, giữ nguyên thuật ngữ kỹ thuật.',
+        },
+        apiKey: {
+          type: 'string',
+          description: '9Router API Key (optional — overrides server .env key)',
+          example: 'sk-...',
+        },
+      },
+    },
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Translated SRT file download.',
+  })
+  @ApiResponse({
+    status: 400,
+    description: 'Bad request — missing file or invalid SRT format.',
+  })
+  @UseInterceptors(
+    FileInterceptor('file', {
+      storage: diskStorage({
+        destination: './uploads',
+        filename: (_req, file, cb) => {
+          const randomName = Array(32)
+            .fill(null)
+            .map(() => Math.round(Math.random() * 16).toString(16))
+            .join('');
+          cb(null, `${randomName}${extname(file.originalname)}`);
+        },
+      }),
+      fileFilter: (_req, file, cb) => {
+        const ext = extname(file.originalname).toLowerCase();
+        if (ext !== '.srt') {
+          cb(
+            new BadRequestException('Only .srt files are allowed.'),
+            false,
+          );
+          return;
+        }
+        cb(null, true);
+      },
+    }),
+  )
+  async translateSrtWith9Router(
+    @UploadedFile() file: Express.Multer.File,
+    @Body() dto: NineRouterTranslateSrtDto,
+    @Res({ passthrough: false }) res: Response,
+  ): Promise<void> {
+    if (!file) {
+      throw new BadRequestException('No SRT file uploaded.');
+    }
+
+    // Read the uploaded SRT file
+    const srtContent = fs.readFileSync(file.path, 'utf-8');
+
+    // Clean up uploaded file after reading
+    try {
+      fs.unlinkSync(file.path);
+    } catch {
+      this.translationService['logger'].warn(
+        `Could not delete temp file: ${file.path}`,
+      );
+    }
+
+    const result = await this.translationService.translateSrtWith9Router(
+      srtContent,
+      dto.model,
+      dto.targetLanguage,
+      dto.customPrompt,
+      dto.apiKey,
     );
 
     // Build the output filename

@@ -128,6 +128,7 @@ export class MediaService {
     voice: string,
     apiKey?: string,
     targetLanguage: string = 'Vietnamese',
+    modelName: string = 'ag/gemini-3-flash-agent',
   ): Promise<{ outputPath: string; outputFilename: string }> {
     const tempDir = os.tmpdir();
 
@@ -163,25 +164,20 @@ export class MediaService {
 
     // 3. Translate SRT
     this.logger.log(
-      `[TranslateVideo] Step 3: Translating SRT to ${targetLanguage}`,
+      `[TranslateVideo] Step 3: Translating SRT to ${targetLanguage} using 9Router model ${modelName}`,
     );
-    const translationResult = await this.translationService.translateSrt(
+    const translationResult = await this.translationService.translateSrtWith9Router(
       originalSrt,
+      modelName,
       targetLanguage,
-      'gemini-2.5-flash',
-      apiKey,
+      undefined, // customPrompt
+      apiKey, // apiKeyOverride
     );
     const translatedSrt = translationResult.translatedSrt;
 
-    // 4. Merge original and translated SRT
-    this.logger.log('[TranslateVideo] Step 4: Creating dual-language SRT');
-    const dualSrt = this.mergeSrts(originalSrt, translatedSrt);
-    const tempSrtPath = path.join(tempDir, `dual-${Date.now()}.srt`);
-    fs.writeFileSync(tempSrtPath, dualSrt, 'utf-8');
-
-    // 5. Generate TTS from translated SRT
+    // 4. Generate TTS from translated SRT
     this.logger.log(
-      `[TranslateVideo] Step 5: Generating TTS audio using voice: ${voice}`,
+      `[TranslateVideo] Step 4: Generating TTS audio using voice: ${voice}`,
     );
     const tempTtsAudioPath = path.join(tempDir, `tts-${Date.now()}.mp3`);
     try {
@@ -191,16 +187,13 @@ export class MediaService {
         tempTtsAudioPath,
       );
     } catch (err) {
-      if (fs.existsSync(tempSrtPath)) fs.unlinkSync(tempSrtPath);
       throw new BadRequestException(
         `Failed to generate TTS: ${(err as Error).message}`,
       );
     }
 
-    // 6. Merge the TTS audio and subtitles into the video
-    this.logger.log(
-      '[TranslateVideo] Step 6: Merging TTS audio and dual subtitles into video',
-    );
+    // 5. Merge the TTS audio into video (without burning subtitles)
+    this.logger.log('[TranslateVideo] Step 5: Merging TTS audio into video');
     const inputBasename = path.basename(videoPath, path.extname(videoPath));
     const outputFilename = `${inputBasename}_translated.mp4`;
     const outputPath = path.join(tempDir, `translated-video-${Date.now()}.mp4`);
@@ -211,70 +204,23 @@ export class MediaService {
       const { exec } = await import('child_process');
       const execPromise = promisify(exec);
 
-      // Path escaping for subtitles filter in ffmpeg
-      const escapedSrtPath = tempSrtPath
-        .replace(/\\/g, '/')
-        .replace(/'/g, "'\\''");
-
-      try {
-        this.logger.debug(
-          'Running ffmpeg command for audio replacement and hardsubbing...',
-        );
-        await execPromise(
-          `"${ffmpegInstaller.path}" -i "${videoPath}" -i "${tempTtsAudioPath}" -map 0:v -map 1:a -c:a aac -vf "subtitles='${escapedSrtPath}'" -preset fast -y "${outputPath}"`,
-          { maxBuffer: 100 * 1024 * 1024, timeout: 0 },
-        );
-      } catch (ffmpegErr) {
-        this.logger.warn(
-          `Subtitles burning failed, falling back to audio-only merge: ${(ffmpegErr as Error).message}`,
-        );
-        // Fallback: merge audio only
-        await execPromise(
-          `"${ffmpegInstaller.path}" -i "${videoPath}" -i "${tempTtsAudioPath}" -map 0:v -map 1:a -c:a aac -preset fast -y "${outputPath}"`,
-          { maxBuffer: 100 * 1024 * 1024, timeout: 0 },
-        );
-      }
+      this.logger.debug(
+        'Running ffmpeg command for audio replacement...',
+      );
+      await execPromise(
+        `"${ffmpegInstaller.path}" -i "${videoPath}" -i "${tempTtsAudioPath}" -map 0:v -map 1:a -c:a aac -preset fast -y "${outputPath}"`,
+        { maxBuffer: 100 * 1024 * 1024, timeout: 0 },
+      );
     } catch (err) {
       throw new BadRequestException(
         `Failed to compile final video: ${(err as Error).message}`,
       );
     } finally {
       // Cleanup temp files
-      if (fs.existsSync(tempSrtPath)) fs.unlinkSync(tempSrtPath);
       if (fs.existsSync(tempTtsAudioPath)) fs.unlinkSync(tempTtsAudioPath);
     }
 
     return { outputPath, outputFilename };
-  }
-
-  private mergeSrts(originalSrt: string, translatedSrt: string): string {
-    const parse = (content: string) => {
-      const normalized = content.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
-      const rawBlocks = normalized.split(/\n\n+/).filter((b) => b.trim());
-      const blocks: { index: string; timestamp: string; text: string }[] = [];
-      for (const raw of rawBlocks) {
-        const lines = raw.trim().split('\n');
-        if (lines.length < 3) continue;
-        const index = lines[0].trim();
-        const timestamp = lines[1].trim();
-        const text = lines.slice(2).join('\n');
-        if (!timestamp.includes('-->')) continue;
-        blocks.push({ index, timestamp, text });
-      }
-      return blocks;
-    };
-
-    const origBlocks = parse(originalSrt);
-    const transBlocks = parse(translatedSrt);
-
-    const merged = origBlocks.map((orig, i) => {
-      const trans =
-        transBlocks.find((t) => t.index === orig.index) || transBlocks[i];
-      const text = trans ? `${orig.text}\n${trans.text}` : orig.text;
-      return `${orig.index}\n${orig.timestamp}\n${text}`;
-    });
-
-    return merged.join('\n\n');
   }
 
   /**
@@ -282,5 +228,61 @@ export class MediaService {
    */
   getMimeType(format: string): string {
     return MIME_MAP[format] || 'application/octet-stream';
+  }
+
+  /**
+   * Translate a YouTube video:
+   * 1. Download the YouTube video to a local temp file.
+   * 2. Run the normal translateVideo method on the temp file.
+   * 3. Clean up the temp raw downloaded file.
+   * 4. Resolve a clean output filename based on the YouTube video title.
+   */
+  async translateYoutubeVideo(
+    url: string,
+    voice: string,
+    apiKey?: string,
+    targetLanguage: string = 'Vietnamese',
+    modelName: string = 'ag/gemini-3-flash-agent',
+    quality: string = '1080p',
+  ): Promise<{ outputPath: string; outputFilename: string }> {
+    this.logger.log(`[TranslateYoutubeVideo] Downloading video from YouTube: ${url}`);
+    const tempRawPath = await this.youtubeService.downloadVideoToPath(url, quality);
+
+    try {
+      this.logger.log(`[TranslateYoutubeVideo] Processing translation for local file: ${tempRawPath}`);
+      const translationResult = await this.translateVideo(
+        tempRawPath,
+        voice,
+        apiKey,
+        targetLanguage,
+        modelName,
+      );
+
+      // Clean up the raw downloaded file to save space
+      try {
+        if (fs.existsSync(tempRawPath)) {
+          fs.unlinkSync(tempRawPath);
+        }
+      } catch (err) {
+        this.logger.warn(`Could not delete raw YouTube video temp file: ${tempRawPath}`);
+      }
+
+      // Resolve the clean output filename based on the YouTube title
+      const outputFilename = await this.youtubeService.getVideoFilename(url, '_translated');
+
+      return {
+        outputPath: translationResult.outputPath,
+        outputFilename,
+      };
+
+    } catch (err) {
+      // Clean up on error
+      try {
+        if (fs.existsSync(tempRawPath)) {
+          fs.unlinkSync(tempRawPath);
+        }
+      } catch {}
+      throw err;
+    }
   }
 }

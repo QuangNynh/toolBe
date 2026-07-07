@@ -1,7 +1,15 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { IsNotEmpty, IsOptional, IsString } from 'class-validator';
 
-export class TranslateVideoDto {
+export class TranslateYoutubeVideoDto {
+  @ApiProperty({
+    description: 'The YouTube video URL to translate',
+    example: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
+  })
+  @IsNotEmpty()
+  @IsString()
+  url: string;
+
   @ApiProperty({
     description: 'VieNeu-TTS voice name (e.g. Bình An, Xuân Vĩnh, Ngọc Linh, Ngọc Lan)',
     example: 'Bình An',
@@ -35,4 +43,13 @@ export class TranslateVideoDto {
   @IsOptional()
   @IsString()
   model?: string;
+
+  @ApiPropertyOptional({
+    description: 'Video quality to download from YouTube (best, 1080p, 720p, 480p, 360p)',
+    example: '1080p',
+    default: '1080p',
+  })
+  @IsOptional()
+  @IsString()
+  quality?: string;
 }

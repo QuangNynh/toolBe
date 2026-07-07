@@ -72,7 +72,7 @@ export class YoutubeController {
   ) {
     return this.ytService.downloadProcessAndStream(
       dto.url,
-      dto.quality || 'best',
+      dto.quality || '1080p',
       res,
     );
   }
