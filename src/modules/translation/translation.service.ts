@@ -224,6 +224,263 @@ export class TranslationService implements OnModuleInit {
   }
 
   /**
+   * List available TTS models from 9Router.
+   */
+  async list9RouterTtsModels(): Promise<any> {
+    const apiKey = this.configService.get<string>('API_KEY_9ROUTER');
+    if (!apiKey) {
+      throw new BadRequestException(
+        'API_KEY_9ROUTER is not configured in .env.',
+      );
+    }
+
+    const baseUrl =
+      this.configService.get<string>('BASE_URL_9ROUTER') ||
+      'http://localhost:20128/v1';
+
+    try {
+      this.logger.debug(`Fetching 9Router TTS models from ${baseUrl}/models/tts`);
+      const response = await axios.get(`${baseUrl}/models/tts`, {
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+        },
+      });
+      return response.data;
+    } catch (error: any) {
+      const message =
+        error.response?.data?.error?.message ||
+        error.message ||
+        'Unknown error occurred';
+      this.logger.error(
+        `Failed to list 9Router TTS models: ${message}`,
+        error.stack,
+      );
+      throw new InternalServerErrorException(
+        `Failed to fetch TTS models from 9Router: ${message}`,
+      );
+    }
+  }
+
+  /**
+   * List available voices for a TTS model/provider from 9Router, optionally filtered by country.
+   */
+  async list9RouterTtsVoices(model?: string, country?: string): Promise<any> {
+    const apiKey = this.configService.get<string>('API_KEY_9ROUTER');
+    if (!apiKey) {
+      throw new BadRequestException(
+        'API_KEY_9ROUTER is not configured in .env.',
+      );
+    }
+
+    const baseUrl =
+      this.configService.get<string>('BASE_URL_9ROUTER') ||
+      'http://localhost:20128/v1';
+    const dashboardBaseUrl = baseUrl.endsWith('/v1') ? baseUrl.slice(0, -3) : baseUrl;
+
+    // 1. Try to log in to 9Router dashboard to fetch voices dynamically
+    const cookie = await this.get9RouterDashboardCookie(baseUrl);
+    if (cookie) {
+      try {
+        const queryProviders = model
+          ? [model]
+          : ['elevenlabs', 'deepgram', 'inworld', 'edge-tts', 'local-device', 'gemini'];
+
+        const results = await Promise.all(
+          queryProviders.map(async (prov) => {
+            try {
+              const response = await axios.get(
+                `${dashboardBaseUrl}/api/media-providers/tts/voices`,
+                {
+                  headers: { Cookie: cookie },
+                  params: { provider: prov },
+                },
+              );
+              let list: any[] = [];
+              if (response.data && Array.isArray(response.data.voices)) {
+                list = response.data.voices;
+              } else if (response.data && Array.isArray(response.data)) {
+                list = response.data;
+              }
+              // Map key fields consistently to match OpenAI style
+              return list.map((v: any) => ({
+                id: v.id,
+                name: v.name,
+                gender: v.gender,
+                locale: v.locale || v.Locale || '',
+                provider: prov,
+              }));
+            } catch (err: any) {
+              this.logger.warn(
+                `Failed to fetch voices from 9Router dashboard for provider ${prov}: ${err.message}`,
+              );
+              return [];
+            }
+          }),
+        );
+
+        let allVoices = results.flat();
+        if (country) {
+          allVoices = allVoices.filter((v) =>
+            v.locale.toLowerCase().startsWith(country.toLowerCase()),
+          );
+        }
+        return allVoices;
+      } catch (err: any) {
+        this.logger.warn(
+          `Failed to fetch voices via 9Router dashboard API: ${err.message}. Falling back to static/public API...`,
+        );
+      }
+    }
+
+    // 2. Static/Public Fallback (if login fails or not configured)
+    const geminiVoicesList = [
+      { Name: 'Zephyr', ShortName: 'Zephyr', Gender: 'Male', FriendlyName: 'Zephyr (Gemini)', Locale: 'en-US', provider: 'gemini' },
+      { Name: 'Puck', ShortName: 'Puck', Gender: 'Male', FriendlyName: 'Puck (Gemini)', Locale: 'en-US', provider: 'gemini' },
+      { Name: 'Charon', ShortName: 'Charon', Gender: 'Male', FriendlyName: 'Charon (Gemini)', Locale: 'en-US', provider: 'gemini' },
+      { Name: 'Kore', ShortName: 'Kore', Gender: 'Female', FriendlyName: 'Kore (Gemini)', Locale: 'en-US', provider: 'gemini' },
+      { Name: 'Fenrir', ShortName: 'Fenrir', Gender: 'Male', FriendlyName: 'Fenrir (Gemini)', Locale: 'en-US', provider: 'gemini' },
+      { Name: 'Leda', ShortName: 'Leda', Gender: 'Female', FriendlyName: 'Leda (Gemini)', Locale: 'en-US', provider: 'gemini' },
+      { Name: 'Orus', ShortName: 'Orus', Gender: 'Male', FriendlyName: 'Orus (Gemini)', Locale: 'en-US', provider: 'gemini' },
+      { Name: 'Aoede', ShortName: 'Aoede', Gender: 'Female', FriendlyName: 'Aoede (Gemini)', Locale: 'en-US', provider: 'gemini' },
+      { Name: 'Callirrhoe', ShortName: 'Callirrhoe', Gender: 'Female', FriendlyName: 'Callirrhoe (Gemini)', Locale: 'en-US', provider: 'gemini' },
+      { Name: 'Autonoe', ShortName: 'Autonoe', Gender: 'Female', FriendlyName: 'Autonoe (Gemini)', Locale: 'en-US', provider: 'gemini' },
+      { Name: 'Enceladus', ShortName: 'Enceladus', Gender: 'Male', FriendlyName: 'Enceladus (Gemini)', Locale: 'en-US', provider: 'gemini' },
+      { Name: 'Iapetus', ShortName: 'Iapetus', Gender: 'Male', FriendlyName: 'Iapetus (Gemini)', Locale: 'en-US', provider: 'gemini' },
+      { Name: 'Umbriel', ShortName: 'Umbriel', Gender: 'Male', FriendlyName: 'Umbriel (Gemini)', Locale: 'en-US', provider: 'gemini' },
+      { Name: 'Algieba', ShortName: 'Algieba', Gender: 'Female', FriendlyName: 'Algieba (Gemini)', Locale: 'en-US', provider: 'gemini' },
+      { Name: 'Despina', ShortName: 'Despina', Gender: 'Female', FriendlyName: 'Despina (Gemini)', Locale: 'en-US', provider: 'gemini' },
+      { Name: 'Erinome', ShortName: 'Erinome', Gender: 'Female', FriendlyName: 'Erinome (Gemini)', Locale: 'en-US', provider: 'gemini' },
+      { Name: 'Algenib', ShortName: 'Algenib', Gender: 'Male', FriendlyName: 'Algenib (Gemini)', Locale: 'en-US', provider: 'gemini' },
+      { Name: 'Rasalgethi', ShortName: 'Rasalgethi', Gender: 'Male', FriendlyName: 'Rasalgethi (Gemini)', Locale: 'en-US', provider: 'gemini' },
+      { Name: 'Laomedeia', ShortName: 'Laomedeia', Gender: 'Female', FriendlyName: 'Laomedeia (Gemini)', Locale: 'en-US', provider: 'gemini' },
+      { Name: 'Achernar', ShortName: 'Achernar', Gender: 'Male', FriendlyName: 'Achernar (Gemini)', Locale: 'en-US', provider: 'gemini' },
+      { Name: 'Alnilam', ShortName: 'Alnilam', Gender: 'Male', FriendlyName: 'Alnilam (Gemini)', Locale: 'en-US', provider: 'gemini' },
+      { Name: 'Schedar', ShortName: 'Schedar', Gender: 'Female', FriendlyName: 'Schedar (Gemini)', Locale: 'en-US', provider: 'gemini' },
+      { Name: 'Gacrux', ShortName: 'Gacrux', Gender: 'Male', FriendlyName: 'Gacrux (Gemini)', Locale: 'en-US', provider: 'gemini' },
+      { Name: 'Pulcherrima', ShortName: 'Pulcherrima', Gender: 'Female', FriendlyName: 'Pulcherrima (Gemini)', Locale: 'en-US', provider: 'gemini' },
+      { Name: 'Achird', ShortName: 'Achird', Gender: 'Male', FriendlyName: 'Achird (Gemini)', Locale: 'en-US', provider: 'gemini' },
+      { Name: 'Zubenelgenubi', ShortName: 'Zubenelgenubi', Gender: 'Male', FriendlyName: 'Zubenelgenubi (Gemini)', Locale: 'en-US', provider: 'gemini' },
+      { Name: 'Vindemiatrix', ShortName: 'Vindemiatrix', Gender: 'Female', FriendlyName: 'Vindemiatrix (Gemini)', Locale: 'en-US', provider: 'gemini' },
+      { Name: 'Sadachbia', ShortName: 'Sadachbia', Gender: 'Female', FriendlyName: 'Sadachbia (Gemini)', Locale: 'en-US', provider: 'gemini' },
+      { Name: 'Sadaltager', ShortName: 'Sadaltager', Gender: 'Male', FriendlyName: 'Sadaltager (Gemini)', Locale: 'en-US', provider: 'gemini' },
+      { Name: 'Sulfat', ShortName: 'Sulfat', Gender: 'Male', FriendlyName: 'Sulfat (Gemini)', Locale: 'en-US', provider: 'gemini' },
+    ];
+
+    let filteredGeminiVoices = geminiVoicesList;
+    if (country) {
+      filteredGeminiVoices = geminiVoicesList.filter((v) =>
+        v.Locale.toLowerCase().startsWith(country.toLowerCase()),
+      );
+    }
+
+    if (model?.toLowerCase() === 'gemini') {
+      return filteredGeminiVoices;
+    }
+
+    if (model) {
+      try {
+        return await this.fetchVoicesForProvider(baseUrl, apiKey, model, country);
+      } catch (error: any) {
+        const message =
+          error.response?.data?.error?.message ||
+          error.message ||
+          'Unknown error occurred';
+        this.logger.error(
+          `Failed to list 9Router TTS voices for provider ${model}: ${message}`,
+          error.stack,
+        );
+        throw new InternalServerErrorException(
+          `Failed to fetch TTS voices from 9Router: ${message}`,
+        );
+      }
+    }
+
+    const providers = ['elevenlabs', 'deepgram', 'inworld', 'edge-tts', 'local-device'];
+    
+    this.logger.debug(
+      `Fetching 9Router TTS voices for all providers: ${providers.join(', ')} (country=${country || 'any'})`,
+    );
+
+    const results = await Promise.all(
+      providers.map(async (prov) => {
+        try {
+          const data = await this.fetchVoicesForProvider(baseUrl, apiKey, prov, country);
+          let list: any[] = [];
+          if (Array.isArray(data)) {
+            list = data;
+          } else if (data && Array.isArray(data.voices)) {
+            list = data.voices;
+          } else if (data && typeof data === 'object') {
+            list = Object.values(data);
+          }
+          return list.map((v: any) => ({ ...v, provider: prov }));
+        } catch (err: any) {
+          this.logger.warn(`Could not fetch voices for 9Router provider ${prov}: ${err.message || err}`);
+          return [];
+        }
+      })
+    );
+
+    return [...results.flat(), ...filteredGeminiVoices];
+  }
+
+  /**
+   * Log in to the 9Router dashboard API to retrieve the auth session cookie.
+   */
+  private async get9RouterDashboardCookie(baseUrl: string): Promise<string | null> {
+    const password = this.configService.get<string>('PASSWORD_9ROUTER') || '123456';
+    const dashboardBaseUrl = baseUrl.endsWith('/v1') ? baseUrl.slice(0, -3) : baseUrl;
+
+    try {
+      this.logger.debug(`Logging in to 9Router dashboard at ${dashboardBaseUrl}/api/auth/login...`);
+      const response = await axios.post(`${dashboardBaseUrl}/api/auth/login`, {
+        password,
+      });
+
+      const setCookie = response.headers['set-cookie'];
+      if (!setCookie || setCookie.length === 0) {
+        this.logger.warn('No Set-Cookie header returned from 9Router login.');
+        return null;
+      }
+
+      const cookie = setCookie.find((c) => c.includes('auth_token'));
+      if (!cookie) {
+        this.logger.warn('auth_token cookie not found in 9Router login response.');
+        return null;
+      }
+
+      return cookie.split(';')[0];
+    } catch (err: any) {
+      this.logger.warn(
+        `Failed to log in to 9Router dashboard: ${err.response?.status || err.message}`,
+      );
+      return null;
+    }
+  }
+
+  /**
+   * Helper to fetch voices from 9Router for a specific provider.
+   */
+  private async fetchVoicesForProvider(
+    baseUrl: string,
+    apiKey: string,
+    provider: string,
+    country?: string,
+  ): Promise<any> {
+    const params: any = { provider };
+    if (country) {
+      params.lang = country;
+    }
+    const response = await axios.get(`${baseUrl}/audio/voices`, {
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+      },
+      params,
+    });
+    return response.data;
+  }
+
+  /**
    * Send a chat prompt or history to 9Router.
    */
   async chatWith9Router(

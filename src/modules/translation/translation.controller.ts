@@ -74,6 +74,41 @@ export class TranslationController {
     return this.translationService.list9RouterModels();
   }
 
+  @Get('9router/models/tts')
+  @ApiOperation({ summary: 'List available Text-to-Speech models from 9Router' })
+  @ApiResponse({
+    status: 200,
+    description: 'Returns list of all available TTS models from 9Router.',
+  })
+  async list9RouterTtsModels(): Promise<any> {
+    return this.translationService.list9RouterTtsModels();
+  }
+
+  @Get('9router/voices')
+  @ApiOperation({ summary: 'List supported TTS voices from 9Router by model and optionally country' })
+  @ApiQuery({
+    name: 'model',
+    required: false,
+    description: 'The TTS model ID (e.g. edge-tts, elevenlabs, openai/tts-1)',
+    example: 'edge-tts',
+  })
+  @ApiQuery({
+    name: 'country',
+    required: false,
+    description: 'Optional ISO country/language code (e.g. vi, en, zh-CN)',
+    example: 'vi',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Returns supported voices list.',
+  })
+  async list9RouterTtsVoices(
+    @Query('model') model?: string,
+    @Query('country') country?: string,
+  ): Promise<any> {
+    return this.translationService.list9RouterTtsVoices(model, country);
+  }
+
   @Get('model-info')
   @ApiOperation({
     summary: 'Get detailed info about a specific model (token limits, etc.)',

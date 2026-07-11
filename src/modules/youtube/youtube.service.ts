@@ -273,6 +273,7 @@ export class YoutubeService implements OnModuleInit {
   }
 
   async streamAudio(url: string, res: Response) {
+    let tempAudioPath: string | null = null;
     try {
       // Extract video ID to get metadata
       let videoId: string;
@@ -296,37 +297,53 @@ export class YoutubeService implements OnModuleInit {
         }
       }
 
+      const tempDir = os.tmpdir();
+      const baseName = `yt-audio-${Date.now()}`;
+      tempAudioPath = path.join(tempDir, `${baseName}.mp3`);
+
+      // Tải và trích xuất audio bằng yt-dlp CLI
+      const cmd = `yt-dlp -f "bestaudio/best" --extract-audio --audio-format mp3 --audio-quality 0 -o "${tempAudioPath}" --no-check-certificates --no-warnings --add-header "referer:youtube.com" --add-header "user-agent:googlebot" "${url}"`;
+      console.log(`Executing: ${cmd}`);
+      await execPromise(cmd);
+
+      if (!fs.existsSync(tempAudioPath)) {
+        throw new BadRequestException('Could not download audio file');
+      }
+
+      const stat = fs.statSync(tempAudioPath);
+      const fileSize = stat.size;
+
       res.setHeader('Content-Type', 'audio/mpeg');
+      res.setHeader('Content-Length', fileSize.toString());
       res.setHeader(
         'Content-Disposition',
         `attachment; filename="${filename}"`,
       );
 
-      const subprocess = youtubeDlExec(url, {
-        extractAudio: true,
-        audioFormat: 'mp3',
-        audioQuality: 0, // best audio quality
-        format: 'bestaudio/best', // force audio-only format
-        output: '-',
-        noCheckCertificates: true,
-        noWarnings: true,
-        preferFreeFormats: true,
-        addHeader: ['referer:youtube.com', 'user-agent:googlebot'],
+      const stream = fs.createReadStream(tempAudioPath);
+      stream.pipe(res);
+
+      res.on('finish', () => {
+        if (tempAudioPath) {
+          fs.unlink(tempAudioPath, (err) => {
+            if (err) console.error('Cleanup error:', err);
+          });
+        }
       });
 
-      if (!subprocess.stdout) {
-        throw new BadRequestException('Could not create audio stream');
-      }
-
-      subprocess.stdout.pipe(res);
-
-      if (subprocess.stderr) {
-        subprocess.stderr.on('data', (err) => {
-          console.error(err.toString());
-        });
-      }
+      stream.on('error', (error) => {
+        console.error('Stream error:', error);
+        if (tempAudioPath && fs.existsSync(tempAudioPath)) {
+          fs.unlink(tempAudioPath, () => {});
+        }
+      });
     } catch (error) {
-      throw new BadRequestException(`Error streaming audio: ${error.message}`);
+      if (tempAudioPath && fs.existsSync(tempAudioPath)) {
+        try {
+          fs.unlinkSync(tempAudioPath);
+        } catch {}
+      }
+      throw new BadRequestException(`Error downloading audio: ${error.message}`);
     }
   }
 
@@ -502,6 +519,12 @@ export class YoutubeService implements OnModuleInit {
             try {
               const info = await this.youtube.getInfo(id);
               const b = info.basic_info;
+              const createdAt = b.start_timestamp
+                ? new Date(b.start_timestamp).toISOString()
+                : ((info as any).primary_info?.published?.toString() ||
+                   (info as any).primary_info?.published?.text ||
+                   null);
+
               return {
                 id,
                 title: b.title ?? entry.title ?? null,
@@ -516,6 +539,7 @@ export class YoutubeService implements OnModuleInit {
                 keywords: b.keywords ?? [],
                 is_live: b.is_live ?? false,
                 category: b.category ?? null,
+                created_at: createdAt,
               };
             } catch {
               // Nếu video bị ẩn/lỗi thì trả về thông tin cơ bản từ flatPlaylist
@@ -533,6 +557,7 @@ export class YoutubeService implements OnModuleInit {
                 keywords: [],
                 is_live: false,
                 category: null,
+                created_at: null,
               };
             }
           }),

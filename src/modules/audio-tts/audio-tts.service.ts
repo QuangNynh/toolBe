@@ -6,6 +6,7 @@ import {
   OnModuleInit,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import axios from 'axios';
 import * as ffmpeg from 'fluent-ffmpeg';
 import * as ffmpegInstaller from '@ffmpeg-installer/ffmpeg';
 import * as fs from 'fs';
@@ -500,5 +501,234 @@ export class AudioTtsService implements OnModuleInit {
    */
   private delay(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  /**
+   * Generate speech using 9Router TTS API.
+   * Returns a promise that resolves to the audio buffer.
+   */
+  async generate9RouterTts(model: string, input: string): Promise<Buffer> {
+    const apiKey = this.configService.get<string>('API_KEY_9ROUTER');
+    if (!apiKey) {
+      throw new BadRequestException(
+        'API_KEY_9ROUTER is not configured in .env.',
+      );
+    }
+
+    const baseUrl =
+      this.configService.get<string>('BASE_URL_9ROUTER') ||
+      'http://localhost:20128/v1';
+
+    try {
+      this.logger.log(`Generating TTS via 9Router: model=${model}`);
+      const response = await axios.post(
+        `${baseUrl}/audio/speech`,
+        { model, input },
+        {
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            'Content-Type': 'application/json',
+          },
+          responseType: 'arraybuffer',
+        },
+      );
+
+      return Buffer.from(response.data);
+    } catch (error: any) {
+      let message = 'Unknown error occurred';
+      if (error.response?.data) {
+        try {
+          const errJson = JSON.parse(Buffer.from(error.response.data).toString('utf-8'));
+          message = errJson?.error?.message || errJson?.message || message;
+        } catch {
+          message = error.message || message;
+        }
+      } else {
+        message = error.message || message;
+      }
+      this.logger.error(`9Router TTS generation failed: ${message}`, error.stack);
+      throw new InternalServerErrorException(`9Router TTS failed: ${message}`);
+    }
+  }
+
+  /**
+   * Process SRT file and generate timeline-aligned audio using 9Router.
+   */
+  async generate9RouterTtsFromSrt(
+    srtContent: string,
+    model: string,
+    outputPath: string,
+  ): Promise<void> {
+    // 1. Parse the SRT content
+    const parser = new SrtParser2();
+    const lines: SrtLine[] = parser.fromSrt(srtContent);
+
+    if (!lines || lines.length === 0) {
+      throw new BadRequestException(
+        'No valid subtitle lines found in the uploaded SRT file.',
+      );
+    }
+
+    this.logger.log(
+      `Starting 9Router SRT TTS pipeline: ${lines.length} lines, model="${model}"`,
+    );
+
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tts-9router-'));
+    const speedTolerance = 0.05;
+
+    try {
+      const segmentInfo: { startMs: number; endMs: number; path: string }[] = [];
+
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        const text = line.text.replace(/\n/g, ' ').trim();
+        if (!text) continue;
+
+        const startMs = Math.round(line.startSeconds * 1000);
+        const endMs = Math.round(line.endSeconds * 1000);
+        const targetDurationMs = endMs - startMs;
+
+        if (targetDurationMs <= 0) continue;
+
+        // Step 1: Generate audio using 9Router
+        const audioBuffer = await this.generate9RouterTts(model, text);
+        const rawChunkPath = path.join(tempDir, `chunk-${i}-raw.mp3`);
+        fs.writeFileSync(rawChunkPath, audioBuffer);
+
+        // Step 2: Probe the actual duration of the generated MP3
+        const actualDurationSec = await new Promise<number>((resolve, reject) => {
+          ffmpeg.ffprobe(rawChunkPath, (err, metadata) => {
+            if (err) return reject(err);
+            resolve(metadata.format.duration || 0);
+          });
+        });
+        const actualDurationMs = Math.round(actualDurationSec * 1000);
+
+        // Step 3: Determine speed adjustment factor
+        const speedFactor = actualDurationMs / targetDurationMs;
+        const finalChunkPath = path.join(tempDir, `chunk-${i}-final.mp3`);
+
+        if (Math.abs(speedFactor - 1.0) > speedTolerance) {
+          // Speed adjustment needed (limit factor and build atempo filter chain)
+          let currentFactor = speedFactor;
+          const filters: string[] = [];
+          while (currentFactor > 2.0) {
+            filters.push('atempo=2.0');
+            currentFactor /= 2.0;
+          }
+          while (currentFactor < 0.5) {
+            filters.push('atempo=0.5');
+            currentFactor /= 0.5;
+          }
+          if (currentFactor !== 1.0) {
+            filters.push(`atempo=${currentFactor.toFixed(4)}`);
+          }
+
+          this.logger.debug(
+            `Line ${i + 1}: actual=${actualDurationMs}ms, target=${targetDurationMs}ms, speedFactor=${speedFactor.toFixed(3)}. Adjusting speed...`,
+          );
+
+          await new Promise<void>((resolve, reject) => {
+            ffmpeg(rawChunkPath)
+              .audioFilters(filters.join(','))
+              .save(finalChunkPath)
+              .on('end', () => resolve())
+              .on('error', (err) => reject(err));
+          });
+        } else {
+          this.logger.debug(
+            `Line ${i + 1}: actual=${actualDurationMs}ms, target=${targetDurationMs}ms, within tolerance. No speed adjustment.`,
+          );
+          fs.copyFileSync(rawChunkPath, finalChunkPath);
+        }
+
+        segmentInfo.push({
+          startMs,
+          endMs,
+          path: finalChunkPath,
+        });
+      }
+
+      if (segmentInfo.length === 0) {
+        throw new Error('No audio segments were generated.');
+      }
+
+      // Step 4: Probe the format details of the first chunk to generate silence with matching properties
+      let sampleRate = 24000;
+      let channels = 1;
+      try {
+        const firstChunk = segmentInfo[0].path;
+        const meta = await new Promise<any>((resolve, reject) => {
+          ffmpeg.ffprobe(firstChunk, (err, metadata) => {
+            if (err) return reject(err);
+            resolve(metadata);
+          });
+        });
+        const stream = meta.streams.find((s: any) => s.codec_type === 'audio');
+        if (stream) {
+          sampleRate = stream.sample_rate ? parseInt(stream.sample_rate, 10) : sampleRate;
+          channels = stream.channels ? parseInt(stream.channels, 10) : channels;
+        }
+      } catch (e: any) {
+        this.logger.warn(`Could not probe first chunk format: ${e.message}`);
+      }
+
+      const createSilenceMp3 = (outputPath: string, durationMs: number): Promise<void> => {
+        return new Promise((resolve, reject) => {
+          const durationSec = durationMs / 1000;
+          const channelLayout = channels === 2 ? 'stereo' : 'mono';
+          ffmpeg()
+            .input(`anullsrc=channel_layout=${channelLayout}:sample_rate=${sampleRate}`)
+            .inputFormat('lavfi')
+            .duration(durationSec)
+            .audioCodec('libmp3lame')
+            .save(outputPath)
+            .on('end', () => resolve())
+            .on('error', (err) => reject(err));
+        });
+      };
+
+      // Step 5: Merge segments with silence gaps
+      this.logger.log('Assembling final audio with silence gaps...');
+      segmentInfo.sort((a, b) => a.startMs - b.startMs);
+
+      const orderedPaths: string[] = [];
+      let currentPosMs = 0;
+
+      for (let idx = 0; idx < segmentInfo.length; idx++) {
+        const seg = segmentInfo[idx];
+        if (seg.startMs > currentPosMs) {
+          const gapMs = seg.startMs - currentPosMs;
+          const silencePath = path.join(tempDir, `silence-${idx}.mp3`);
+          await createSilenceMp3(silencePath, gapMs);
+          orderedPaths.push(silencePath);
+          this.logger.debug(`Inserted ${gapMs}ms silence gap`);
+        }
+
+        orderedPaths.push(seg.path);
+
+        const segDurationSec = await new Promise<number>((resolve, reject) => {
+          ffmpeg.ffprobe(seg.path, (err, metadata) => {
+            if (err) return reject(err);
+            resolve(metadata.format.duration || 0);
+          });
+        });
+        const segDurationMs = Math.round(segDurationSec * 1000);
+        currentPosMs = seg.startMs + segDurationMs;
+      }
+
+      // Concatenate everything using the concat filter helper method
+      await this.concatWavAndConvertToMp3(orderedPaths, outputPath);
+
+      this.logger.log(`9Router SRT TTS completed successfully → ${outputPath}`);
+    } catch (error) {
+      const message = this.extractErrorDetail(error);
+      this.logger.error(`9Router SRT TTS generation failed: ${message}`);
+      throw new InternalServerErrorException(
+        `9Router SRT TTS generation failed: ${message}`,
+      );
+    } finally {
+      this.cleanupTempDir(tempDir);
+    }
   }
 }

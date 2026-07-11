@@ -25,6 +25,7 @@ import * as path from 'path';
 
 import { AudioTtsService } from './audio-tts.service';
 import { GenerateTtsDto } from './dto/generate-tts.dto';
+import { NineRouterSpeechDto } from './dto/nine-router-speech.dto';
 import { VieneuVoice } from './constants/voices.constant';
 
 @ApiTags('Audio TTS')
@@ -178,6 +179,35 @@ export class AudioTtsController {
       this.safeDelete(outputPath);
       throw error;
     }
+  }
+
+  // ─── 9Router Speech Generation ────────────────────────────────────────
+
+  @Post('speech')
+  @ApiOperation({
+    summary: 'Generate speech audio from text using 9Router TTS',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Synthesized MP3 audio stream.',
+  })
+  async generateSpeech(
+    @Body() dto: NineRouterSpeechDto,
+    @Res() res: Response,
+  ): Promise<void> {
+    const audioBuffer = await this.audioTtsService.generate9RouterTts(
+      dto.model,
+      dto.input,
+    );
+
+    res.setHeader('Content-Type', 'audio/mpeg');
+    res.setHeader('Content-Length', audioBuffer.length.toString());
+    res.setHeader(
+      'Content-Disposition',
+      'attachment; filename="speech.mp3"',
+    );
+
+    res.end(audioBuffer);
   }
 
   // ─── Helpers ──────────────────────────────────────────────────────────
