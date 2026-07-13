@@ -308,7 +308,7 @@ export class YoutubeService implements OnModuleInit {
 
       const ytdlpProxy = this.proxyService.getYtdlpProxy();
       const proxyArg = ytdlpProxy ? `--proxy "${ytdlpProxy}"` : '';
-      const cmd = `yt-dlp --buffer-size 1024K --http-chunk-size 10M -f "bestaudio[ext=m4a]/bestaudio" -o "${rawFile}" --no-check-certificates --no-warnings ${proxyArg} "${url}"`;
+      const cmd = `yt-dlp --buffer-size 1024K --http-chunk-size 10M -f "bestaudio[ext=m4a]/bestaudio/best" -o "${rawFile}" --no-check-certificates --no-warnings ${proxyArg} "${url}"`;
       
       console.log(`Executing: ${cmd}`);
       await execPromise(cmd);

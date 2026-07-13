@@ -7,6 +7,7 @@ import { SocksProxyAgent } from 'socks-proxy-agent';
 export class ProxyService implements OnModuleInit, OnModuleDestroy {
   private server: Server;
   private requestCount = 0;
+  private ytdlpProxyIndex = 0;
 
   async onModuleInit() {
     this.server = new Server({
@@ -23,15 +24,12 @@ export class ProxyService implements OnModuleInit, OnModuleDestroy {
   }
 
   getProxyAgent(): any {
-    const ytdlpProxy = process.env.YTDLP_PROXY;
+    const ytdlpProxy = this.getYtdlpProxy();
     if (ytdlpProxy) {
       if (ytdlpProxy.startsWith('socks')) {
         return new SocksProxyAgent(ytdlpProxy);
       }
       return new HttpsProxyAgent(ytdlpProxy);
-    }
-    if (this.hasUpstreamProxy()) {
-      return new HttpsProxyAgent(this.getProxyUrl());
     }
     return undefined;
   }
@@ -66,6 +64,24 @@ export class ProxyService implements OnModuleInit, OnModuleDestroy {
   }
 
   getYtdlpProxy(): string | undefined {
+    const proxies = [
+      process.env.YTDLP_PROXY_1,
+      process.env.YTDLP_PROXY_2,
+    ]
+      .map((p) => p?.trim())
+      .filter((p): p is string => !!p);
+
+    // Filter out placeholders
+    const activeProxies = proxies.filter(
+      (p) => !p.includes('username:password') && !p.includes('ip:port'),
+    );
+
+    if (activeProxies.length > 0) {
+      const selected = activeProxies[this.ytdlpProxyIndex % activeProxies.length];
+      this.ytdlpProxyIndex++;
+      return selected;
+    }
+
     if (process.env.YTDLP_PROXY) {
       return process.env.YTDLP_PROXY;
     }
