@@ -285,17 +285,18 @@ export class InstagramService {
    * Tries to use the configured proxy first, and falls back to a direct connection if it fails.
    */
   private async getInstagramData(url: string): Promise<InstagramResponse> {
-    const proxyUrl = this.proxyService.getProxyUrl();
-    const agent = new HttpsProxyAgent(proxyUrl);
+    const agent = this.proxyService.getProxyAgent();
 
     // 1. Try with proxy first
-    try {
-      this.logger.log(`Attempting to fetch Instagram metadata using proxy: ${proxyUrl}`);
-      return await this.fetchInstagramDataCustom(url, agent);
-    } catch (proxyError: any) {
-      this.logger.warn(
-        `Proxy request failed (${proxyError.message}). Retrying with direct connection...`
-      );
+    if (agent) {
+      try {
+        this.logger.log(`Attempting to fetch Instagram metadata using proxy`);
+        return await this.fetchInstagramDataCustom(url, agent);
+      } catch (proxyError: any) {
+        this.logger.warn(
+          `Proxy request failed (${proxyError.message}). Retrying with direct connection...`
+        );
+      }
     }
 
     // 2. Fallback to direct request
@@ -349,26 +350,27 @@ export class InstagramService {
    */
   private async getWebProfileInfo(username: string): Promise<any> {
     const url = `https://www.instagram.com/api/v1/users/web_profile_info/?username=${username}`;
-    const proxyUrl = this.proxyService.getProxyUrl();
-    const agent = new HttpsProxyAgent(proxyUrl);
+    const agent = this.proxyService.getProxyAgent();
 
     let responseData: any;
     let fetched = false;
 
     // 1. Try with proxy
-    try {
-      this.logger.log(`Fetching web profile info using proxy: ${proxyUrl}`);
-      const response = await axios.request({
-        method: 'GET',
-        url,
-        httpsAgent: agent,
-        httpAgent: agent,
-        headers: this.getUserFeedHeaders(username),
-      });
-      responseData = response.data;
-      fetched = true;
-    } catch (proxyError: any) {
-      this.logger.warn(`Proxy request for web profile info failed: ${proxyError.message}. Retrying direct...`);
+    if (agent) {
+      try {
+        this.logger.log(`Fetching web profile info using proxy`);
+        const response = await axios.request({
+          method: 'GET',
+          url,
+          httpsAgent: agent,
+          httpAgent: agent,
+          headers: this.getUserFeedHeaders(username),
+        });
+        responseData = response.data;
+        fetched = true;
+      } catch (proxyError: any) {
+        this.logger.warn(`Proxy request for web profile info failed: ${proxyError.message}. Retrying direct...`);
+      }
     }
 
     // 2. Fallback to direct connection
@@ -469,8 +471,7 @@ export class InstagramService {
 
       // 2. Fetch feed items sequentially from Instagram to collect all available posts up to MAX_PAGES
       const baseFeedUrl = `https://www.instagram.com/api/v1/feed/user/${username}/username/`;
-      const proxyUrl = this.proxyService.getProxyUrl();
-      const agent = new HttpsProxyAgent(proxyUrl);
+      const agent = this.proxyService.getProxyAgent();
 
       let allItems: any[] = [];
       let currentMaxId: string | null = null;
@@ -493,20 +494,22 @@ export class InstagramService {
         let fetched = false;
 
         // Try with proxy
-        try {
-          const response = await axios.request({
-            method: 'GET',
-            url,
-            httpsAgent: agent,
-            httpAgent: agent,
-            headers: this.getUserFeedHeaders(username),
-          });
-          responseData = response.data;
-          fetched = true;
-        } catch (proxyError: any) {
-          this.logger.warn(
-            `Proxy request page ${pagesFetched + 1} failed: ${proxyError.message}. Retrying direct...`,
-          );
+        if (agent) {
+          try {
+            const response = await axios.request({
+              method: 'GET',
+              url,
+              httpsAgent: agent,
+              httpAgent: agent,
+              headers: this.getUserFeedHeaders(username),
+            });
+            responseData = response.data;
+            fetched = true;
+          } catch (proxyError: any) {
+            this.logger.warn(
+              `Proxy request page ${pagesFetched + 1} failed: ${proxyError.message}. Retrying direct...`,
+            );
+          }
         }
 
         // Fallback to direct connection
@@ -915,22 +918,23 @@ export class InstagramService {
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
 
     // 1. Try streaming with proxy
-    try {
-      const proxyUrl = this.proxyService.getProxyUrl();
-      this.logger.log(`Attempting to stream video using proxy...`);
-      const agent = new HttpsProxyAgent(proxyUrl);
-      const response = await axios({
-        url: videoUrl,
-        method: 'GET',
-        responseType: 'stream',
-        httpsAgent: agent,
-        httpAgent: agent,
-        headers: this.getDownloadHeaders(),
-      });
-      response.data.pipe(res);
-      return;
-    } catch (proxyError: any) {
-      this.logger.warn(`Failed to stream video using proxy: ${proxyError.message}. Retrying direct download...`);
+    const agent = this.proxyService.getProxyAgent();
+    if (agent) {
+      try {
+        this.logger.log(`Attempting to stream video using proxy...`);
+        const response = await axios({
+          url: videoUrl,
+          method: 'GET',
+          responseType: 'stream',
+          httpsAgent: agent,
+          httpAgent: agent,
+          headers: this.getDownloadHeaders(),
+        });
+        response.data.pipe(res);
+        return;
+      } catch (proxyError: any) {
+        this.logger.warn(`Failed to stream video using proxy: ${proxyError.message}. Retrying direct download...`);
+      }
     }
 
     // 2. Fallback to direct stream
@@ -976,14 +980,15 @@ export class InstagramService {
     let downloaded = false;
     
     // 1. Try downloading with proxy first
-    try {
-      const proxyUrl = this.proxyService.getProxyUrl();
-      this.logger.log(`Attempting to download video for audio extraction using proxy...`);
-      const agent = new HttpsProxyAgent(proxyUrl);
-      await this.downloadToFile(videoUrl, tempVideoPath, agent);
-      downloaded = true;
-    } catch (proxyError: any) {
-      this.logger.warn(`Proxy download for audio failed: ${proxyError.message}. Retrying direct download...`);
+    const agent = this.proxyService.getProxyAgent();
+    if (agent) {
+      try {
+        this.logger.log(`Attempting to download video for audio extraction using proxy...`);
+        await this.downloadToFile(videoUrl, tempVideoPath, agent);
+        downloaded = true;
+      } catch (proxyError: any) {
+        this.logger.warn(`Proxy download for audio failed: ${proxyError.message}. Retrying direct download...`);
+      }
     }
 
     // 2. Fallback to direct download
@@ -1034,7 +1039,7 @@ export class InstagramService {
     }
   }
 
-  private async downloadToFile(url: string, destPath: string, agent?: HttpsProxyAgent<string>) {
+  private async downloadToFile(url: string, destPath: string, agent?: any) {
     const response = await axios({
       url,
       method: 'GET',

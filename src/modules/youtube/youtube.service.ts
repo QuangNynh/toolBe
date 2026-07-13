@@ -3,7 +3,7 @@
  
 import { BadRequestException, Injectable, OnModuleInit } from '@nestjs/common';
 import axios from 'axios';
-import { exec } from 'child_process';
+import { exec, spawn } from 'child_process';
 import { Response } from 'express';
 import * as Ffmpeg from 'fluent-ffmpeg';
 import * as fs from 'fs';
@@ -25,7 +25,7 @@ const execPromise = promisify(exec);
 @Injectable()
 export class YoutubeService implements OnModuleInit {
   private youtube: Innertube;
-  private proxyAgent: HttpsProxyAgent<string>;
+  private proxyAgent: any;
 
   constructor(private readonly proxyService: ProxyService) {}
 
@@ -60,7 +60,7 @@ export class YoutubeService implements OnModuleInit {
     };
 
     this.youtube = await Innertube.create();
-    this.proxyAgent = new HttpsProxyAgent(this.proxyService.getProxyUrl());
+    this.proxyAgent = this.proxyService.getProxyAgent();
   }
 
   private async sleep(ms: number) {
@@ -265,7 +265,9 @@ export class YoutubeService implements OnModuleInit {
 
     console.log(`Downloading video for local processing with quality: ${quality}`);
 
-    const cmd = `yt-dlp -f "${formatString}" --merge-output-format mp4 -o "${rawFile}" --no-check-certificates --no-warnings --add-header "referer:youtube.com" --add-header "user-agent:googlebot" "${url}"`;
+    const ytdlpProxy = this.proxyService.getYtdlpProxy();
+    const proxyArg = ytdlpProxy ? `--proxy "${ytdlpProxy}"` : '';
+    const cmd = `yt-dlp --buffer-size 1024K --http-chunk-size 10M -f "${formatString}" --merge-output-format mp4 -o "${rawFile}" --no-check-certificates --no-warnings ${proxyArg} "${url}"`;
     console.log(`Executing: ${cmd}`);
     await execPromise(cmd);
 
@@ -273,7 +275,8 @@ export class YoutubeService implements OnModuleInit {
   }
 
   async streamAudio(url: string, res: Response) {
-    let tempAudioPath: string | null = null;
+    let rawFile: string | null = null;
+    let finalFile: string | null = null;
     try {
       // Extract video ID to get metadata
       let videoId: string;
@@ -284,14 +287,14 @@ export class YoutubeService implements OnModuleInit {
         videoId = parts[parts.length - 1] || '';
       }
 
-      let filename = 'audio.mp3';
+      let filename = 'audio.m4a';
       if (videoId) {
         try {
           const info = await this.youtube.getInfo(videoId);
           const sanitizedTitle = this.sanitizeFilename(
             info.basic_info.title || 'audio',
           );
-          filename = `${sanitizedTitle}.mp3`;
+          filename = `${sanitizedTitle}.m4a`;
         } catch {
           // If can't get info, use default filename
         }
@@ -299,51 +302,95 @@ export class YoutubeService implements OnModuleInit {
 
       const tempDir = os.tmpdir();
       const baseName = `yt-audio-${Date.now()}`;
-      tempAudioPath = path.join(tempDir, `${baseName}.mp3`);
+      rawFile = path.join(tempDir, `${baseName}-raw.%(ext)s`);
 
-      // Tải và trích xuất audio bằng yt-dlp CLI
-      const cmd = `yt-dlp -f "bestaudio/best" --extract-audio --audio-format mp3 --audio-quality 0 -o "${tempAudioPath}" --no-check-certificates --no-warnings --add-header "referer:youtube.com" --add-header "user-agent:googlebot" "${url}"`;
+      console.log(`Downloading audio to disk: ${url}`);
+
+      const ytdlpProxy = this.proxyService.getYtdlpProxy();
+      const proxyArg = ytdlpProxy ? `--proxy "${ytdlpProxy}"` : '';
+      const cmd = `yt-dlp --buffer-size 1024K --http-chunk-size 10M -f "bestaudio[ext=m4a]/bestaudio" -o "${rawFile}" --no-check-certificates --no-warnings ${proxyArg} "${url}"`;
+      
       console.log(`Executing: ${cmd}`);
       await execPromise(cmd);
 
-      if (!fs.existsSync(tempAudioPath)) {
-        throw new BadRequestException('Could not download audio file');
+      // Find the actual downloaded file
+      const files = fs.readdirSync(tempDir);
+      const downloadedFile = files.find(f => f.startsWith(baseName));
+      if (!downloadedFile) {
+        throw new BadRequestException('Downloaded audio file does not exist');
+      }
+      const downloadedFilePath = path.join(tempDir, downloadedFile);
+      rawFile = downloadedFilePath; // Update rawFile path for cleanup
+
+      const isM4a = downloadedFile.endsWith('.m4a');
+      
+      if (isM4a) {
+        console.log(`Audio is already in M4A format, streaming directly without transcoding...`);
+        finalFile = downloadedFilePath;
+        rawFile = null; // Set to null so cleanup doesn't delete it before streaming finishes
+      } else {
+        console.log(`Audio is in non-M4A format (${downloadedFile.split('.').pop()}), transcoding to MP3...`);
+        finalFile = path.join(tempDir, `${baseName}-final.mp3`);
+        filename = filename.replace(/\.m4a$/, '.mp3'); // Fallback filename to .mp3
+
+        await new Promise<void>((resolve, reject) => {
+          Ffmpeg(downloadedFilePath)
+            .audioCodec('libmp3lame')
+            .audioBitrate(128)
+            .save(finalFile as string)
+            .on('end', () => resolve())
+            .on('error', (err: Error) => reject(err));
+        });
+
+        // Delete raw file
+        try {
+          fs.unlinkSync(downloadedFilePath);
+        } catch {
+          // Ignore
+        }
+        rawFile = null;
       }
 
-      const stat = fs.statSync(tempAudioPath);
+      if (!fs.existsSync(finalFile)) {
+        throw new BadRequestException('Audio file does not exist');
+      }
+
+      const stat = fs.statSync(finalFile);
       const fileSize = stat.size;
 
-      res.setHeader('Content-Type', 'audio/mpeg');
+      res.setHeader('Content-Type', isM4a ? 'audio/mp4' : 'audio/mpeg');
       res.setHeader('Content-Length', fileSize.toString());
       res.setHeader(
         'Content-Disposition',
         `attachment; filename="${filename}"`,
       );
 
-      const stream = fs.createReadStream(tempAudioPath);
+      const stream = fs.createReadStream(finalFile);
       stream.pipe(res);
 
+      const targetFile = finalFile;
       res.on('finish', () => {
-        if (tempAudioPath) {
-          fs.unlink(tempAudioPath, (err) => {
-            if (err) console.error('Cleanup error:', err);
-          });
-        }
+        fs.unlink(targetFile, (err) => {
+          if (err) console.error('Cleanup error:', err);
+        });
       });
 
       stream.on('error', (error) => {
         console.error('Stream error:', error);
-        if (tempAudioPath && fs.existsSync(tempAudioPath)) {
-          fs.unlink(tempAudioPath, () => {});
-        }
+        fs.unlink(targetFile, () => {});
       });
-    } catch (error) {
-      if (tempAudioPath && fs.existsSync(tempAudioPath)) {
-        try {
-          fs.unlinkSync(tempAudioPath);
-        } catch {}
+
+    } catch (error: any) {
+      console.error('Error in streamAudio:', error);
+      if (rawFile && fs.existsSync(rawFile)) {
+        try { fs.unlinkSync(rawFile); } catch {}
       }
-      throw new BadRequestException(`Error downloading audio: ${error.message}`);
+      if (finalFile && fs.existsSync(finalFile)) {
+        try { fs.unlinkSync(finalFile); } catch {}
+      }
+      if (!res.headersSent) {
+        res.status(500).send(`Error downloading audio: ${error.message}`);
+      }
     }
   }
 
@@ -413,7 +460,9 @@ export class YoutubeService implements OnModuleInit {
       console.log(`Downloading video: ${filename} with quality: ${quality}`);
 
       // Step 1: Download video using system's yt-dlp binary
-      const cmd = `yt-dlp -f "${formatString}" --merge-output-format mp4 -o "${rawFile}" --no-check-certificates --no-warnings --add-header "referer:youtube.com" --add-header "user-agent:googlebot" "${url}"`;
+      const ytdlpProxy = this.proxyService.getYtdlpProxy();
+      const proxyArg = ytdlpProxy ? `--proxy "${ytdlpProxy}"` : '';
+      const cmd = `yt-dlp --buffer-size 1024K --http-chunk-size 10M -f "${formatString}" --merge-output-format mp4 -o "${rawFile}" --no-check-certificates --no-warnings ${proxyArg} "${url}"`;
       console.log(`Executing: ${cmd}`);
       await execPromise(cmd);
 
@@ -493,12 +542,17 @@ export class YoutubeService implements OnModuleInit {
   async getChannelVideos(url: string, concurrency = 10) {
     try {
       // Bước 1: flatPlaylist:true → lấy danh sách video ID rất nhanh
-      const result = await youtubeDlExec(url, {
+      const ytDlOpts: any = {
         dumpSingleJson: true,
         flatPlaylist: true,
         noWarnings: true,
         noCheckCertificates: true,
-      });
+      };
+      const ytdlpProxy = this.proxyService.getYtdlpProxy();
+      if (ytdlpProxy) {
+        ytDlOpts.proxy = ytdlpProxy;
+      }
+      const result = await youtubeDlExec(url, ytDlOpts);
 
       if (!result) {
         throw new BadRequestException('No data returned from youtube-dl');

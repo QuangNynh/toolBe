@@ -10,6 +10,7 @@ import * as path from 'path';
 import * as os from 'os';
 import * as ffmpeg from 'fluent-ffmpeg';
 import * as ffmpegInstaller from '@ffmpeg-installer/ffmpeg';
+import { ProxyService } from '../proxy/proxy.service';
 
 // Set FFmpeg binary path from the bundled installer
 ffmpeg.setFfmpegPath(ffmpegInstaller.path);
@@ -17,6 +18,8 @@ ffmpeg.setFfmpegPath(ffmpegInstaller.path);
 @Injectable()
 export class TiktokService {
   private readonly logger = new Logger(TiktokService.name);
+
+  constructor(private readonly proxyService: ProxyService) {}
 
   async getChannelVideos(url: string, limitVal?: number) {
     try {
@@ -31,6 +34,11 @@ export class TiktokService {
         noWarnings: true,
         noCheckCertificates: true,
       };
+
+      const ytdlpProxy = this.proxyService.getYtdlpProxy();
+      if (ytdlpProxy) {
+        options.proxy = ytdlpProxy;
+      }
 
       if (limitVal !== undefined && limitVal > 0) {
         options.playlistItems = `1-${limitVal}`;
@@ -98,6 +106,7 @@ export class TiktokService {
           dumpSingleJson: true,
           noWarnings: true,
           noCheckCertificates: true,
+          proxy: this.proxyService.getYtdlpProxy(),
         });
         if (metaResult && metaResult.stdout) {
           const meta = JSON.parse(metaResult.stdout);
@@ -127,6 +136,7 @@ export class TiktokService {
         output: rawFile,
         noCheckCertificates: true,
         noWarnings: true,
+        proxy: this.proxyService.getYtdlpProxy(),
       });
 
       if (!fs.existsSync(rawFile)) {
@@ -233,6 +243,7 @@ export class TiktokService {
           dumpSingleJson: true,
           noWarnings: true,
           noCheckCertificates: true,
+          proxy: this.proxyService.getYtdlpProxy(),
         });
         if (metaResult && metaResult.stdout) {
           const meta = JSON.parse(metaResult.stdout);
@@ -262,6 +273,7 @@ export class TiktokService {
         output: rawFile,
         noCheckCertificates: true,
         noWarnings: true,
+        proxy: this.proxyService.getYtdlpProxy(),
       });
 
       // yt-dlp might append extension to rawFile, let's find the downloaded file
