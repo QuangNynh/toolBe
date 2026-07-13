@@ -921,16 +921,33 @@ export class PinterestService {
       finalFile = path.join(tempDir, `pinterest-${Date.now()}-final.mp4`);
 
       this.logger.log(`Downloading Pinterest video...`);
-      const agent = this.proxyService.getProxyAgent();
-      const videoResponse = await axios.get(mapped.video_url, {
-        responseType: 'arraybuffer',
-        headers: {
-          'User-Agent': DEFAULT_HEADERS['User-Agent'],
-          Referer: 'https://www.pinterest.com/',
-        },
-        httpsAgent: agent,
-        httpAgent: agent,
-      });
+      let videoResponse: any;
+      let lastErr: any = null;
+      let downloadSuccess = false;
+
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+          const agent = this.proxyService.getProxyAgent();
+          videoResponse = await axios.get(mapped.video_url, {
+            responseType: 'arraybuffer',
+            headers: {
+              'User-Agent': DEFAULT_HEADERS['User-Agent'],
+              Referer: 'https://www.pinterest.com/',
+            },
+            httpsAgent: agent,
+            httpAgent: agent,
+          });
+          downloadSuccess = true;
+          break;
+        } catch (err: any) {
+          this.logger.warn(`Failed to download Pinterest video on attempt ${attempt}: ${err.message}`);
+          lastErr = err;
+        }
+      }
+
+      if (!downloadSuccess) {
+        throw lastErr || new Error('Failed to download video from Pinterest after 3 attempts');
+      }
       const videoBuffer = Buffer.from(videoResponse.data);
       fs.writeFileSync(rawFile, videoBuffer);
 
@@ -1005,16 +1022,33 @@ export class PinterestService {
       const tempDir = os.tmpdir();
       downloadedFile = path.join(tempDir, `pinterest-img-${Date.now()}`);
 
-      const agent = this.proxyService.getProxyAgent();
-      const imageResponse = await axios.get(mapped.image_url, {
-        responseType: 'arraybuffer',
-        headers: {
-          'User-Agent': DEFAULT_HEADERS['User-Agent'],
-          Referer: 'https://www.pinterest.com/',
-        },
-        httpsAgent: agent,
-        httpAgent: agent,
-      });
+      let imageResponse: any;
+      let lastErr: any = null;
+      let downloadSuccess = false;
+
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+          const agent = this.proxyService.getProxyAgent();
+          imageResponse = await axios.get(mapped.image_url, {
+            responseType: 'arraybuffer',
+            headers: {
+              'User-Agent': DEFAULT_HEADERS['User-Agent'],
+              Referer: 'https://www.pinterest.com/',
+            },
+            httpsAgent: agent,
+            httpAgent: agent,
+          });
+          downloadSuccess = true;
+          break;
+        } catch (err: any) {
+          this.logger.warn(`Failed to download Pinterest image on attempt ${attempt}: ${err.message}`);
+          lastErr = err;
+        }
+      }
+
+      if (!downloadSuccess) {
+        throw lastErr || new Error('Failed to download image from Pinterest after 3 attempts');
+      }
 
       const contentType = imageResponse.headers['content-type'] || 'image/jpeg';
       let ext = 'jpg';
@@ -1081,16 +1115,33 @@ export class PinterestService {
       finalFile = path.join(tempDir, `pinterest-audio-${ts}-final.mp3`);
 
       this.logger.log(`Downloading video for audio extraction...`);
-      const agent = this.proxyService.getProxyAgent();
-      const videoResponse = await axios.get(mapped.video_url, {
-        responseType: 'arraybuffer',
-        headers: {
-          'User-Agent': DEFAULT_HEADERS['User-Agent'],
-          Referer: 'https://www.pinterest.com/',
-        },
-        httpsAgent: agent,
-        httpAgent: agent,
-      });
+      let videoResponse: any;
+      let lastErr: any = null;
+      let downloadSuccess = false;
+
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+          const agent = this.proxyService.getProxyAgent();
+          videoResponse = await axios.get(mapped.video_url, {
+            responseType: 'arraybuffer',
+            headers: {
+              'User-Agent': DEFAULT_HEADERS['User-Agent'],
+              Referer: 'https://www.pinterest.com/',
+            },
+            httpsAgent: agent,
+            httpAgent: agent,
+          });
+          downloadSuccess = true;
+          break;
+        } catch (err: any) {
+          this.logger.warn(`Failed to download Pinterest audio on attempt ${attempt}: ${err.message}`);
+          lastErr = err;
+        }
+      }
+
+      if (!downloadSuccess) {
+        throw lastErr || new Error('Failed to download audio from Pinterest after 3 attempts');
+      }
       const videoBuffer = Buffer.from(videoResponse.data);
       fs.writeFileSync(rawFile, videoBuffer);
 
