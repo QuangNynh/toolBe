@@ -229,6 +229,52 @@ export class YoutubeService implements OnModuleInit {
     return `video${suffix}.mp4`;
   }
 
+  private async runYtdlpWithRetry(
+    formatString: string,
+    rawFile: string,
+    url: string,
+    options: { mergeOutputFormat?: string } = {},
+  ): Promise<void> {
+    let success = false;
+    let lastError: any = null;
+    const maxAttempts = 3;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      const ytdlpProxy = this.proxyService.getYtdlpProxy();
+      const proxyArg = ytdlpProxy ? `--proxy "${ytdlpProxy}"` : '';
+      const mergeArg = options.mergeOutputFormat ? `--merge-output-format ${options.mergeOutputFormat}` : '';
+      
+      const cmd = `yt-dlp --buffer-size 1024K --http-chunk-size 10M -f "${formatString}" ${mergeArg} -o "${rawFile}" --no-check-certificates --no-warnings ${proxyArg} "${url}"`;
+      
+      try {
+        console.log(`Executing (Attempt ${attempt}/${maxAttempts}): ${cmd}`);
+        await execPromise(cmd);
+        success = true;
+        break;
+      } catch (err: any) {
+        console.warn(`yt-dlp attempt ${attempt} failed: ${err.message}`);
+        lastError = err;
+        // Clean up partial downloads if any, so next attempt doesn't conflict
+        try {
+          const tempDir = path.dirname(rawFile);
+          const baseName = path.basename(rawFile).split('.')[0];
+          const files = fs.readdirSync(tempDir);
+          for (const file of files) {
+            if (file.startsWith(baseName)) {
+              fs.unlinkSync(path.join(tempDir, file));
+            }
+          }
+        } catch {
+          // Ignore cleanup errors
+        }
+      }
+    }
+
+    if (!success) {
+      throw lastError || new Error('All download attempts failed');
+    }
+  }
+
   async downloadVideoToPath(
     url: string,
     quality: string = '1080p',
@@ -265,11 +311,7 @@ export class YoutubeService implements OnModuleInit {
 
     console.log(`Downloading video for local processing with quality: ${quality}`);
 
-    const ytdlpProxy = this.proxyService.getYtdlpProxy();
-    const proxyArg = ytdlpProxy ? `--proxy "${ytdlpProxy}"` : '';
-    const cmd = `yt-dlp --buffer-size 1024K --http-chunk-size 10M -f "${formatString}" --merge-output-format mp4 -o "${rawFile}" --no-check-certificates --no-warnings ${proxyArg} "${url}"`;
-    console.log(`Executing: ${cmd}`);
-    await execPromise(cmd);
+    await this.runYtdlpWithRetry(formatString, rawFile, url, { mergeOutputFormat: 'mp4' });
 
     return rawFile;
   }
@@ -306,12 +348,7 @@ export class YoutubeService implements OnModuleInit {
 
       console.log(`Downloading audio to disk: ${url}`);
 
-      const ytdlpProxy = this.proxyService.getYtdlpProxy();
-      const proxyArg = ytdlpProxy ? `--proxy "${ytdlpProxy}"` : '';
-      const cmd = `yt-dlp --buffer-size 1024K --http-chunk-size 10M -f "bestaudio[ext=m4a]/bestaudio/best" -o "${rawFile}" --no-check-certificates --no-warnings ${proxyArg} "${url}"`;
-      
-      console.log(`Executing: ${cmd}`);
-      await execPromise(cmd);
+      await this.runYtdlpWithRetry('bestaudio[ext=m4a]/bestaudio/best', rawFile, url);
 
       // Find the actual downloaded file
       const files = fs.readdirSync(tempDir);
@@ -460,11 +497,7 @@ export class YoutubeService implements OnModuleInit {
       console.log(`Downloading video: ${filename} with quality: ${quality}`);
 
       // Step 1: Download video using system's yt-dlp binary
-      const ytdlpProxy = this.proxyService.getYtdlpProxy();
-      const proxyArg = ytdlpProxy ? `--proxy "${ytdlpProxy}"` : '';
-      const cmd = `yt-dlp --buffer-size 1024K --http-chunk-size 10M -f "${formatString}" --merge-output-format mp4 -o "${rawFile}" --no-check-certificates --no-warnings ${proxyArg} "${url}"`;
-      console.log(`Executing: ${cmd}`);
-      await execPromise(cmd);
+      await this.runYtdlpWithRetry(formatString, rawFile as string, url, { mergeOutputFormat: 'mp4' });
 
       console.log(`Download complete, re-encoding for compatibility...`);
 

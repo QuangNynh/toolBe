@@ -146,11 +146,23 @@ export class PinterestService {
 
   private mapPinData(pin: any) {
     const images = pin.images || {};
-    const origImage =
+    let origImage =
       images.orig?.url ||
       images['736x']?.url ||
       images['474x']?.url ||
       null;
+
+    // Fallback for story pin images if origImage is missing
+    if (!origImage && pin.story_pin_data?.pages) {
+      for (const page of pin.story_pin_data.pages) {
+        const pageImages = page.image?.images || {};
+        const pageImage = pageImages.originals?.url || pageImages['750x']?.url || pageImages['736x']?.url;
+        if (pageImage) {
+          origImage = pageImage;
+          break;
+        }
+      }
+    }
 
     let videoUrl: string | null = null;
     if (pin.videos?.video_list) {
@@ -171,11 +183,67 @@ export class PinterestService {
       }
     }
 
+    // Fallback for story/idea pins containing video blocks
+    if (!videoUrl && pin.story_pin_data?.pages) {
+      for (const page of pin.story_pin_data.pages) {
+        // 1. Check blocks inside page
+        if (page.blocks) {
+          for (const block of page.blocks) {
+            if (block.video?.video_list) {
+              const videoList = block.video.video_list;
+              const preferred = ['V_EXP7', 'V_EXP6', 'V_EXP5', 'V_EXP4', 'V_EXP3', 'V_HLSV3_MOBILE'];
+              for (const key of preferred) {
+                if (videoList[key]?.url) {
+                  videoUrl = videoList[key].url;
+                  break;
+                }
+              }
+              if (!videoUrl) {
+                const entries = Object.values(videoList) as any[];
+                const sorted = entries
+                  .filter((v) => v.url)
+                  .sort((a, b) => (b.width ?? 0) - (a.width ?? 0));
+                videoUrl = sorted[0]?.url ?? null;
+              }
+            }
+            if (videoUrl) break;
+          }
+        }
+        // 2. Check page-level video
+        if (!videoUrl && page.video?.video_list) {
+          const videoList = page.video.video_list;
+          const preferred = ['V_EXP7', 'V_EXP6', 'V_EXP5', 'V_EXP4', 'V_EXP3', 'V_HLSV3_MOBILE'];
+          for (const key of preferred) {
+            if (videoList[key]?.url) {
+              videoUrl = videoList[key].url;
+              break;
+            }
+          }
+          if (!videoUrl) {
+            const entries = Object.values(videoList) as any[];
+            const sorted = entries
+              .filter((v) => v.url)
+              .sort((a, b) => (b.width ?? 0) - (a.width ?? 0));
+            videoUrl = sorted[0]?.url ?? null;
+          }
+        }
+        if (videoUrl) break;
+      }
+    }
+
     const isVideo = !!(pin.is_video || pin.videos || videoUrl);
     const saves =
       pin.aggregated_pin_data?.aggregated_stats?.saves ??
       pin.repin_count ??
       0;
+
+    let likeCount = 0;
+    if (pin.reaction_counts) {
+      likeCount = (Object.values(pin.reaction_counts) as any[]).reduce(
+        (sum: number, val: any): number => sum + (Number(val) || 0),
+        0,
+      );
+    }
 
     // Parse created_at thành timestamp
     let timestamp: number | null = null;
@@ -198,6 +266,7 @@ export class PinterestService {
       created_at: pin.created_at || null,
       takenAt: timestamp,
       comment_count: pin.comment_count ?? 0,
+      like_count: likeCount,
       repin_count: pin.repin_count ?? 0,
       save_count: saves,
       image_url: origImage,
@@ -582,6 +651,7 @@ export class PinterestService {
       { header: 'STT', key: 'stt', width: 8 },
       { header: 'Link', key: 'link', width: 50 },
       { header: 'Type', key: 'type', width: 10 },
+      { header: 'Likes', key: 'likes', width: 12 },
       { header: 'Saves', key: 'saves', width: 12 },
       { header: 'Repins', key: 'repins', width: 12 },
       { header: 'Comments', key: 'comments', width: 12 },
@@ -608,6 +678,7 @@ export class PinterestService {
         stt: index + 1,
         link: item.pin_url || '',
         type: item.type || '',
+        likes: item.like_count || 0,
         saves: item.save_count || 0,
         repins: item.repin_count || 0,
         comments: item.comment_count || 0,
@@ -616,6 +687,7 @@ export class PinterestService {
     });
 
     worksheet.getColumn('stt').alignment = { horizontal: 'center' };
+    worksheet.getColumn('likes').alignment = { horizontal: 'right' };
     worksheet.getColumn('saves').alignment = { horizontal: 'right' };
     worksheet.getColumn('repins').alignment = { horizontal: 'right' };
     worksheet.getColumn('comments').alignment = { horizontal: 'right' };
