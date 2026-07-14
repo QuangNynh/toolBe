@@ -927,21 +927,38 @@ export class PinterestService {
 
       for (let attempt = 1; attempt <= 3; attempt++) {
         try {
-          const agent = this.proxyService.getProxyAgent();
-          videoResponse = await axios.get(mapped.video_url, {
+          // Try without proxy first, as Pinterest may block SOCKS proxies
+          const config: any = {
             responseType: 'arraybuffer',
             headers: {
               'User-Agent': DEFAULT_HEADERS['User-Agent'],
               Referer: 'https://www.pinterest.com/',
             },
-            httpsAgent: agent,
-            httpAgent: agent,
-          });
+            timeout: 30000, // 30 second timeout
+          };
+
+          // Only use proxy if attempt > 1 (retry with proxy)
+          if (attempt > 1) {
+            const agent = this.proxyService.getProxyAgent();
+            if (agent) {
+              config.httpsAgent = agent;
+              config.httpAgent = agent;
+              this.logger.log(`Attempt ${attempt}: Trying with proxy`);
+            }
+          } else {
+            this.logger.log(`Attempt ${attempt}: Trying without proxy`);
+          }
+
+          videoResponse = await axios.get(mapped.video_url, config);
           downloadSuccess = true;
           break;
         } catch (err: any) {
           this.logger.warn(`Failed to download Pinterest video on attempt ${attempt}: ${err.message}`);
           lastErr = err;
+          // Wait a bit before retry
+          if (attempt < 3) {
+            await new Promise(resolve => setTimeout(resolve, 2000));
+          }
         }
       }
 
