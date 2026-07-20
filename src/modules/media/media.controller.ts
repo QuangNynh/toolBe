@@ -131,7 +131,7 @@ export class MediaController {
         await this.mediaService.extractAudio(file.path, format, bitrate);
 
       // Get file size for Content-Length header
-      const stat = fs.statSync(outputPath);
+      const stat = await fs.promises.stat(outputPath);
       const mimeType = this.mediaService.getMimeType(format);
 
       // Set response headers
@@ -149,24 +149,18 @@ export class MediaController {
       // Cleanup after streaming
       res.on('finish', () => {
         // Delete output audio file
-        if (fs.existsSync(outputPath)) {
-          fs.unlinkSync(outputPath);
-        }
+        fs.unlink(outputPath, () => {});
         // Delete uploaded video file
-        if (fs.existsSync(file.path)) {
-          fs.unlinkSync(file.path);
-        }
+        fs.unlink(file.path, () => {});
       });
 
       stream.on('error', () => {
-        if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath);
-        if (fs.existsSync(file.path)) fs.unlinkSync(file.path);
+        fs.unlink(outputPath, () => {});
+        fs.unlink(file.path, () => {});
       });
     } catch (error) {
       // Cleanup uploaded file on error
-      if (fs.existsSync(file.path)) {
-        fs.unlinkSync(file.path);
-      }
+      fs.unlink(file.path, () => {});
       throw error;
     }
   }
@@ -278,7 +272,7 @@ export class MediaController {
         );
 
       // Get file size for Content-Length header
-      const stat = fs.statSync(outputPath);
+      const stat = await fs.promises.stat(outputPath);
 
       // Set response headers
       res.setHeader('Content-Type', 'video/mp4');
@@ -295,24 +289,18 @@ export class MediaController {
       // Cleanup after streaming
       res.on('finish', () => {
         // Delete output video file
-        if (fs.existsSync(outputPath)) {
-          fs.unlinkSync(outputPath);
-        }
+        fs.unlink(outputPath, () => {});
         // Delete uploaded video file
-        if (fs.existsSync(file.path)) {
-          fs.unlinkSync(file.path);
-        }
+        fs.unlink(file.path, () => {});
       });
 
       stream.on('error', () => {
-        if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath);
-        if (fs.existsSync(file.path)) fs.unlinkSync(file.path);
+        fs.unlink(outputPath, () => {});
+        fs.unlink(file.path, () => {});
       });
     } catch (error) {
       // Cleanup uploaded file on error
-      if (fs.existsSync(file.path)) {
-        fs.unlinkSync(file.path);
-      }
+      fs.unlink(file.path, () => {});
       throw error;
     }
   }
@@ -355,7 +343,7 @@ export class MediaController {
         );
 
       // Get file size for Content-Length header
-      const stat = fs.statSync(outputPath);
+      const stat = await fs.promises.stat(outputPath);
 
       // Set response headers
       res.setHeader('Content-Type', 'video/mp4');
@@ -371,15 +359,11 @@ export class MediaController {
 
       // Cleanup output file after streaming
       res.on('finish', () => {
-        if (fs.existsSync(outputPath)) {
-          fs.unlinkSync(outputPath);
-        }
+        fs.unlink(outputPath, () => {});
       });
 
       stream.on('error', () => {
-        if (fs.existsSync(outputPath)) {
-          fs.unlinkSync(outputPath);
-        }
+        fs.unlink(outputPath, () => {});
       });
     } catch (error) {
       throw error;

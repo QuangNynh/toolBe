@@ -349,11 +349,11 @@ export class TranslationController {
     }
 
     // Read the uploaded SRT file
-    const srtContent = fs.readFileSync(file.path, 'utf-8');
+    const srtContent = await fs.promises.readFile(file.path, 'utf-8');
 
     // Clean up uploaded file after reading
     try {
-      fs.unlinkSync(file.path);
+      await fs.promises.unlink(file.path);
     } catch {
       this.translationService['logger'].warn(
         `Could not delete temp file: ${file.path}`,
@@ -466,11 +466,11 @@ export class TranslationController {
     }
 
     // Read the uploaded SRT file
-    const srtContent = fs.readFileSync(file.path, 'utf-8');
+    const srtContent = await fs.promises.readFile(file.path, 'utf-8');
 
     // Clean up uploaded file after reading
     try {
-      fs.unlinkSync(file.path);
+      await fs.promises.unlink(file.path);
     } catch {
       this.translationService['logger'].warn(
         `Could not delete temp file: ${file.path}`,

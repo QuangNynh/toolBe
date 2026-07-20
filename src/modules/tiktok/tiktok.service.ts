@@ -143,25 +143,41 @@ export class TiktokService {
         throw new BadRequestException('Downloaded file does not exist');
       }
 
-      this.logger.log(`Download complete, re-encoding for compatibility...`);
+      this.logger.log(`Download complete, re-encoding for compatibility if needed...`);
 
       // Step 3: Re-encode with ffmpeg for CapCut/Media Player compatibility
       const inputPath = rawFile;
       const outputPath = finalFile;
-      await new Promise<void>((resolve, reject) => {
-        ffmpeg(inputPath)
-          .videoCodec('libx264')
-          .audioCodec('aac')
-          .outputOptions([
-            '-movflags +faststart', // Enable fast start
-            '-preset fast', // Fast encoding
-            '-crf 23', // Quality (lower = better, 23 is good)
-            '-pix_fmt yuv420p', // Pixel format for maximum player compatibility
-          ])
-          .save(outputPath)
-          .on('end', () => resolve())
-          .on('error', (err: Error) => reject(err));
-      });
+      const reencode = await this.shouldReencodeVideo(inputPath);
+      if (reencode) {
+        this.logger.log(`Re-encoding TikTok video for compatibility...`);
+        await new Promise<void>((resolve, reject) => {
+          ffmpeg(inputPath)
+            .videoCodec('libx264')
+            .audioCodec('aac')
+            .outputOptions([
+              '-movflags +faststart', // Enable fast start
+              '-preset fast', // Fast encoding
+              '-crf 23', // Quality (lower = better, 23 is good)
+              '-pix_fmt yuv420p', // Pixel format for maximum player compatibility
+            ])
+            .save(outputPath)
+            .on('end', () => resolve())
+            .on('error', (err: Error) => reject(err));
+        });
+      } else {
+        this.logger.log(`TikTok video already compliant. Remuxing with stream copy...`);
+        await new Promise<void>((resolve, reject) => {
+          ffmpeg(inputPath)
+            .outputOptions([
+              '-c copy',
+              '-movflags +faststart',
+            ])
+            .save(outputPath)
+            .on('end', () => resolve())
+            .on('error', (err: Error) => reject(err));
+        });
+      }
 
       // Delete raw file
       try {
@@ -364,6 +380,27 @@ export class TiktokService {
       this.logger.error(`Failed to download TikTok audio: ${msg}`, error);
       throw new BadRequestException(`Failed to download TikTok audio: ${msg}`);
     }
+  }
+
+  private shouldReencodeVideo(filePath: string): Promise<boolean> {
+    return new Promise((resolve) => {
+      ffmpeg.ffprobe(filePath, (err, metadata) => {
+        if (err) {
+          this.logger.warn(`ffprobe error: ${err.message}`);
+          return resolve(true); // Default to safe path (re-encode)
+        }
+        const videoStream = metadata?.streams?.find((s) => s.codec_type === 'video');
+        const audioStream = metadata?.streams?.find((s) => s.codec_type === 'audio');
+        if (!videoStream) return resolve(true);
+
+        const isH264 = videoStream.codec_name === 'h264';
+        const hasAudio = !!audioStream;
+        const isAac = hasAudio ? audioStream.codec_name === 'aac' : true;
+        const isYuv420p = videoStream.pix_fmt === 'yuv420p';
+
+        resolve(!(isH264 && isAac && isYuv420p));
+      });
+    });
   }
 
   private sanitizeFilename(name: string): string {

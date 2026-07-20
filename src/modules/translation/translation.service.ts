@@ -8,6 +8,7 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { GoogleGenAI } from '@google/genai';
 import axios from 'axios';
+import pLimit from 'p-limit';
 
 /** Represents a single SRT subtitle block */
 interface SrtBlock {
@@ -821,28 +822,31 @@ export class TranslationService implements OnModuleInit {
     this.logger.log(logMessage);
 
     const chunks = this.chunkArray(blocks, this.SRT_CHUNK_SIZE);
-    const translatedBlocks: SrtBlock[] = [];
+    const limit = pLimit(5);
 
-    for (let i = 0; i < chunks.length; i++) {
-      this.logger.debug(
-        `Translating chunk ${i + 1}/${chunks.length} (${chunks[i].length} blocks)`,
-      );
+    const translationPromises = chunks.map((chunk, i) =>
+      limit(async () => {
+        this.logger.debug(
+          `Translating chunk ${i + 1}/${chunks.length} (${chunk.length} blocks)`,
+        );
 
-      // Add delay between chunks to avoid rate limiting (skip for first chunk)
-      if (i > 0) {
-        await this.delay(this.CHUNK_DELAY_MS);
-      }
+        // Stagger requests slightly to prevent API rate bursts
+        if (i > 0) {
+          await this.delay(i * 200);
+        }
 
-      const translated = await this.translateSrtChunk(
-        chunks[i],
-        targetLanguage,
-        model,
-        client,
-        customPrompt,
-      );
+        return this.translateSrtChunk(
+          chunk,
+          targetLanguage,
+          model,
+          client,
+          customPrompt,
+        );
+      }),
+    );
 
-      translatedBlocks.push(...translated);
-    }
+    const results = await Promise.all(translationPromises);
+    const translatedBlocks = results.flat();
 
     const translatedSrt = this.assembleSrt(translatedBlocks);
 
@@ -891,27 +895,31 @@ export class TranslationService implements OnModuleInit {
     this.logger.log(logMessage);
 
     const chunks = this.chunkArray(blocks, this.SRT_CHUNK_SIZE);
-    const translatedBlocks: SrtBlock[] = [];
+    const limit = pLimit(5);
 
-    for (let i = 0; i < chunks.length; i++) {
-      this.logger.debug(
-        `Translating chunk ${i + 1}/${chunks.length} (${chunks[i].length} blocks) via 9Router`,
-      );
+    const translationPromises = chunks.map((chunk, i) =>
+      limit(async () => {
+        this.logger.debug(
+          `Translating chunk ${i + 1}/${chunks.length} (${chunk.length} blocks) via 9Router`,
+        );
 
-      // Add delay between chunks to avoid rate limiting (skip for first chunk)
-      if (i > 0) {
-        await this.delay(this.CHUNK_DELAY_MS);
-      }
+        // Stagger requests slightly to prevent API rate bursts
+        if (i > 0) {
+          await this.delay(i * 200);
+        }
 
-      const translated = await this.translateSrtChunkWith9Router(
-        chunks[i],
-        targetLanguage,
-        modelName,
-        customPrompt,
-        apiKeyOverride,
-      );
-      translatedBlocks.push(...translated);
-    }
+        return this.translateSrtChunkWith9Router(
+          chunk,
+          targetLanguage,
+          modelName,
+          customPrompt,
+          apiKeyOverride,
+        );
+      }),
+    );
+
+    const results = await Promise.all(translationPromises);
+    const translatedBlocks = results.flat();
 
     const translatedSrt = this.assembleSrt(translatedBlocks);
 

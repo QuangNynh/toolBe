@@ -420,7 +420,7 @@ export class InstagramService {
 
     // Establish cache file location
     const cacheDir = path.join(process.cwd(), 'data', 'instagram');
-    fs.mkdirSync(cacheDir, { recursive: true });
+    await fs.promises.mkdir(cacheDir, { recursive: true });
     const cacheFilePath = path.join(cacheDir, `${username}.json`);
 
     let cachedData: {
@@ -430,10 +430,11 @@ export class InstagramService {
     } | null = null;
 
     // Try reading cache file if it exists
-    if (fs.existsSync(cacheFilePath)) {
+    const cacheExists = await fs.promises.access(cacheFilePath).then(() => true).catch(() => false);
+    if (cacheExists) {
       try {
         this.logger.log(`Loading cached data from project file: ${cacheFilePath}`);
-        const fileContent = fs.readFileSync(cacheFilePath, 'utf-8');
+        const fileContent = await fs.promises.readFile(cacheFilePath, 'utf-8');
         cachedData = JSON.parse(fileContent);
       } catch (err: any) {
         this.logger.error(`Failed to read or parse cache file: ${err.message}. Will fetch fresh data.`);
@@ -579,7 +580,7 @@ export class InstagramService {
           overallTotalCount,
         };
         this.logger.log(`Caching feed data to file: ${cacheFilePath}`);
-        fs.writeFileSync(cacheFilePath, JSON.stringify(dataToCache, null, 2), 'utf-8');
+        await fs.promises.writeFile(cacheFilePath, JSON.stringify(dataToCache, null, 2), 'utf-8');
       } catch (err: any) {
         this.logger.error(`Failed to write cache file: ${err.message}`);
       }

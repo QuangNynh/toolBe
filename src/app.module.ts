@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { ConfigModule } from '@nestjs/config';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { YouTubeModule } from './modules/youtube/youtube.module';
@@ -11,6 +12,10 @@ import { PinterestModule } from './modules/pinterest/pinterest.module';
 
 @Module({
   imports: [
+    ConfigModule.forRoot({
+      isGlobal: true,
+      envFilePath: '.env',
+    }),
     YouTubeModule,
     TranslationModule,
     MediaModule,

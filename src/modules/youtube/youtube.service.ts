@@ -116,9 +116,6 @@ export class YoutubeService implements OnModuleInit {
 
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
-        // Add random delay 2-6s before request
-        await this.sleep(Math.random() * 4000 + 2000);
-
         const info = await this.youtube.getInfo(videoId);
         const metadata = this.buildMetadata(info, videoId);
 
@@ -506,20 +503,36 @@ export class YoutubeService implements OnModuleInit {
         throw new BadRequestException('Temp file paths not initialized');
       }
 
-      await new Promise<void>((resolve, reject) => {
-        Ffmpeg(rawFile as string)
-          .videoCodec('libx264')
-          .audioCodec('aac')
-          .outputOptions([
-            '-movflags +faststart', // Enable fast start
-            '-preset fast', // Fast encoding
-            '-crf 23', // Quality (lower = better, 23 is good)
-            '-pix_fmt yuv420p', // Pixel format for compatibility
-          ])
-          .save(finalFile as string)
-          .on('end', () => resolve())
-          .on('error', (err: Error) => reject(err));
-      });
+      const reencode = await this.shouldReencodeVideo(rawFile);
+      if (reencode) {
+        console.log(`Re-encoding video for compatibility...`);
+        await new Promise<void>((resolve, reject) => {
+          Ffmpeg(rawFile as string)
+            .videoCodec('libx264')
+            .audioCodec('aac')
+            .outputOptions([
+              '-movflags +faststart', // Enable fast start
+              '-preset fast', // Fast encoding
+              '-crf 23', // Quality (lower = better, 23 is good)
+              '-pix_fmt yuv420p', // Pixel format for compatibility
+            ])
+            .save(finalFile as string)
+            .on('end', () => resolve())
+            .on('error', (err: Error) => reject(err));
+        });
+      } else {
+        console.log(`Video already compliant. Remuxing with stream copy...`);
+        await new Promise<void>((resolve, reject) => {
+          Ffmpeg(rawFile as string)
+            .outputOptions([
+              '-c copy',
+              '-movflags +faststart',
+            ])
+            .save(finalFile as string)
+            .on('end', () => resolve())
+            .on('error', (err: Error) => reject(err));
+        });
+      }
 
       // Delete raw file
       fs.unlinkSync(rawFile);
@@ -894,5 +907,26 @@ export class YoutubeService implements OnModuleInit {
         `Error downloading script file: ${(error as Error).message}`,
       );
     }
+  }
+
+  private shouldReencodeVideo(filePath: string): Promise<boolean> {
+    return new Promise((resolve) => {
+      Ffmpeg.ffprobe(filePath, (err, metadata) => {
+        if (err) {
+          console.warn('ffprobe error:', err);
+          return resolve(true); // Default to safe path (re-encode)
+        }
+        const videoStream = metadata?.streams?.find((s) => s.codec_type === 'video');
+        const audioStream = metadata?.streams?.find((s) => s.codec_type === 'audio');
+        if (!videoStream) return resolve(true);
+
+        const isH264 = videoStream.codec_name === 'h264';
+        const hasAudio = !!audioStream;
+        const isAac = hasAudio ? audioStream.codec_name === 'aac' : true;
+        const isYuv420p = videoStream.pix_fmt === 'yuv420p';
+
+        resolve(!(isH264 && isAac && isYuv420p));
+      });
+    });
   }
 }

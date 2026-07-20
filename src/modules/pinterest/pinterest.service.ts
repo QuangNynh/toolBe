@@ -319,7 +319,7 @@ export class PinterestService {
 
     // ── Cache setup ──
     const cacheDir = path.join(process.cwd(), 'data', 'pinterest');
-    fs.mkdirSync(cacheDir, { recursive: true });
+    await fs.promises.mkdir(cacheDir, { recursive: true });
     const cacheKey = this.getCacheKey(parsed);
     const cacheFilePath = path.join(cacheDir, `${cacheKey}.json`);
 
@@ -331,10 +331,11 @@ export class PinterestService {
     } | null = null;
 
     // Đọc cache nếu tồn tại
-    if (fs.existsSync(cacheFilePath)) {
+    const cacheExists = await fs.promises.access(cacheFilePath).then(() => true).catch(() => false);
+    if (cacheExists) {
       try {
         this.logger.log(`Loading cached data from: ${cacheFilePath}`);
-        const fileContent = fs.readFileSync(cacheFilePath, 'utf-8');
+        const fileContent = await fs.promises.readFile(cacheFilePath, 'utf-8');
         cachedData = JSON.parse(fileContent);
       } catch (err: any) {
         this.logger.error(
@@ -540,7 +541,7 @@ export class PinterestService {
           overallTotalCount,
         };
         this.logger.log(`Caching Pinterest data to: ${cacheFilePath}`);
-        fs.writeFileSync(
+        await fs.promises.writeFile(
           cacheFilePath,
           JSON.stringify(dataToCache, null, 2),
           'utf-8',
@@ -927,27 +928,18 @@ export class PinterestService {
 
       for (let attempt = 1; attempt <= 3; attempt++) {
         try {
-          // Try without proxy first, as Pinterest may block SOCKS proxies
+          const agent = this.proxyService.getProxyAgent();
           const config: any = {
             responseType: 'arraybuffer',
             headers: {
               'User-Agent': DEFAULT_HEADERS['User-Agent'],
               Referer: 'https://www.pinterest.com/',
             },
-            timeout: 30000, // 30 second timeout
+            timeout: 30000,
+            httpsAgent: agent,
+            httpAgent: agent,
           };
-
-          // Only use proxy if attempt > 1 (retry with proxy)
-          if (attempt > 1) {
-            const agent = this.proxyService.getProxyAgent();
-            if (agent) {
-              config.httpsAgent = agent;
-              config.httpAgent = agent;
-              this.logger.log(`Attempt ${attempt}: Trying with proxy`);
-            }
-          } else {
-            this.logger.log(`Attempt ${attempt}: Trying without proxy`);
-          }
+          this.logger.log(`Attempt ${attempt}: Downloading video via Proxy bridge`);
 
           videoResponse = await axios.get(mapped.video_url, config);
           downloadSuccess = true;
@@ -968,21 +960,37 @@ export class PinterestService {
       const videoBuffer = Buffer.from(videoResponse.data);
       fs.writeFileSync(rawFile, videoBuffer);
 
-      this.logger.log(`Re-encoding for compatibility...`);
-      await new Promise<void>((resolve, reject) => {
-        ffmpeg(rawFile as string)
-          .videoCodec('libx264')
-          .audioCodec('aac')
-          .outputOptions([
-            '-movflags +faststart',
-            '-preset fast',
-            '-crf 23',
-            '-pix_fmt yuv420p',
-          ])
-          .save(finalFile as string)
-          .on('end', () => resolve())
-          .on('error', (err: Error) => reject(err));
-      });
+      this.logger.log(`Re-encoding for compatibility if needed...`);
+      const reencode = await this.shouldReencodeVideo(rawFile);
+      if (reencode) {
+        this.logger.log(`Re-encoding Pinterest video for compatibility...`);
+        await new Promise<void>((resolve, reject) => {
+          ffmpeg(rawFile as string)
+            .videoCodec('libx264')
+            .audioCodec('aac')
+            .outputOptions([
+              '-movflags +faststart',
+              '-preset fast',
+              '-crf 23',
+              '-pix_fmt yuv420p',
+            ])
+            .save(finalFile as string)
+            .on('end', () => resolve())
+            .on('error', (err: Error) => reject(err));
+        });
+      } else {
+        this.logger.log(`Pinterest video already compliant. Remuxing with stream copy...`);
+        await new Promise<void>((resolve, reject) => {
+          ffmpeg(rawFile as string)
+            .outputOptions([
+              '-c copy',
+              '-movflags +faststart',
+            ])
+            .save(finalFile as string)
+            .on('end', () => resolve())
+            .on('error', (err: Error) => reject(err));
+        });
+      }
 
       try { fs.unlinkSync(rawFile); } catch { /* ignore */ }
       rawFile = null;
@@ -1046,15 +1054,19 @@ export class PinterestService {
       for (let attempt = 1; attempt <= 3; attempt++) {
         try {
           const agent = this.proxyService.getProxyAgent();
-          imageResponse = await axios.get(mapped.image_url, {
+          const config: any = {
             responseType: 'arraybuffer',
             headers: {
               'User-Agent': DEFAULT_HEADERS['User-Agent'],
               Referer: 'https://www.pinterest.com/',
             },
+            timeout: 30000,
             httpsAgent: agent,
             httpAgent: agent,
-          });
+          };
+          this.logger.log(`Attempt ${attempt}: Downloading image via Proxy bridge`);
+
+          imageResponse = await axios.get(mapped.image_url, config);
           downloadSuccess = true;
           break;
         } catch (err: any) {
@@ -1139,15 +1151,19 @@ export class PinterestService {
       for (let attempt = 1; attempt <= 3; attempt++) {
         try {
           const agent = this.proxyService.getProxyAgent();
-          videoResponse = await axios.get(mapped.video_url, {
+          const config: any = {
             responseType: 'arraybuffer',
             headers: {
               'User-Agent': DEFAULT_HEADERS['User-Agent'],
               Referer: 'https://www.pinterest.com/',
             },
+            timeout: 30000,
             httpsAgent: agent,
             httpAgent: agent,
-          });
+          };
+          this.logger.log(`Attempt ${attempt}: Downloading audio via Proxy bridge`);
+
+          videoResponse = await axios.get(mapped.video_url, config);
           downloadSuccess = true;
           break;
         } catch (err: any) {
@@ -1200,6 +1216,27 @@ export class PinterestService {
       this.logger.error(`Failed to download Pinterest audio: ${msg}`, error);
       throw new BadRequestException(`Failed to download Pinterest audio: ${msg}`);
     }
+  }
+
+  private shouldReencodeVideo(filePath: string): Promise<boolean> {
+    return new Promise((resolve) => {
+      ffmpeg.ffprobe(filePath, (err, metadata) => {
+        if (err) {
+          this.logger.warn(`ffprobe error: ${err.message}`);
+          return resolve(true); // Default to safe path (re-encode)
+        }
+        const videoStream = metadata?.streams?.find((s) => s.codec_type === 'video');
+        const audioStream = metadata?.streams?.find((s) => s.codec_type === 'audio');
+        if (!videoStream) return resolve(true);
+
+        const isH264 = videoStream.codec_name === 'h264';
+        const hasAudio = !!audioStream;
+        const isAac = hasAudio ? audioStream.codec_name === 'aac' : true;
+        const isYuv420p = videoStream.pix_fmt === 'yuv420p';
+
+        resolve(!(isH264 && isAac && isYuv420p));
+      });
+    });
   }
 
   private sanitizeFilename(name: string): string {
