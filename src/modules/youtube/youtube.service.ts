@@ -1390,6 +1390,7 @@ export class YoutubeService implements OnModuleInit {
           status: {
             privacyStatus: 'private',
             publishAt: dto.publishTime,
+            containsSyntheticMedia: dto.containsSyntheticMedia,
           },
         },
       });

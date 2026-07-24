@@ -9,6 +9,7 @@ import {
   ValidatorConstraint,
   ValidatorConstraintInterface,
   Validate,
+  IsBoolean,
 } from 'class-validator';
 
 // ────────────────────────────────────────────────────────────
@@ -98,4 +99,13 @@ export class ScheduleYoutubeDto {
   @IsNotEmpty()
   @Validate(IsFuturePublishTimeConstraint)
   publishTime: string;
+
+  @ApiProperty({
+    description: 'Cho biết video có chứa nội dung do AI tạo ra',
+    example: false,
+    required: false,
+  })
+  @IsOptional()
+  @IsBoolean()
+  containsSyntheticMedia?: boolean;
 }
