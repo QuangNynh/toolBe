@@ -1,4 +1,14 @@
-import { Controller, Post, Body, Res, Query } from '@nestjs/common';
+import {
+  Controller,
+  Post,
+  Body,
+  Delete,
+  Get,
+  Res,
+  Query,
+  Param,
+  BadRequestException,
+} from '@nestjs/common';
 import { ApiOperation, ApiResponse, ApiTags, ApiQuery } from '@nestjs/swagger';
 import { Response } from 'express';
 import { PinterestService } from './pinterest.service';
@@ -6,6 +16,8 @@ import { PinterestChannelDto } from './dto/pinterest-channel.dto';
 import { DownloadPinterestVideoDto } from './dto/download-pinterest-video.dto';
 import { DownloadPinterestImageDto } from './dto/download-pinterest-image.dto';
 import { DownloadPinterestAudioDto } from './dto/download-pinterest-audio.dto';
+import { SchedulePinDto } from './dto/schedule-pin.dto';
+import { PinterestAuthCallbackDto } from './dto/pinterest-auth.dto';
 
 @ApiTags('Pinterest')
 @Controller('pinterest')
@@ -161,5 +173,114 @@ export class PinterestController {
     @Res({ passthrough: false }) res: Response,
   ) {
     return this.pinterestService.downloadAudio(dto.url, res);
+  }
+
+  // ──────────────────────────────────────────────────────────
+  // Pinterest OAuth2 Authentication
+  // ──────────────────────────────────────────────────────────
+
+  @Get('/auth/url')
+  @ApiOperation({
+    summary: 'Lấy URL đăng nhập OAuth2 của Pinterest',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Trả về URL đăng nhập OAuth2',
+  })
+  getAuthUrl() {
+    return this.pinterestService.getAuthUrl();
+  }
+
+  @Post('/auth/callback')
+  @ApiOperation({
+    summary: 'Xử lý Authorization Code từ Client gửi lên để kết nối kênh',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Kết nối tài khoản thành công',
+  })
+  handleAuthCallback(@Body() dto: PinterestAuthCallbackDto) {
+    return this.pinterestService.handleAuthCallback(dto.code);
+  }
+
+  // ──────────────────────────────────────────────────────────
+  // Pinterest Accounts Management (Connected Channels)
+  // ──────────────────────────────────────────────────────────
+
+  @Get('/accounts')
+  @ApiOperation({
+    summary: 'Lấy danh sách các kênh Pinterest đã kết nối',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Mảng chứa danh sách tài khoản (đã ẩn token)',
+  })
+  getConnectedChannels() {
+    return this.pinterestService.getConnectedChannels();
+  }
+
+  @Delete('/accounts/:username')
+  @ApiOperation({
+    summary: 'Hủy kết nối một kênh Pinterest bằng username',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Hủy kết nối thành công',
+  })
+  disconnectChannel(@Param('username') username: string) {
+    return this.pinterestService.disconnectChannel(username);
+  }
+
+  @Get('/accounts/:username/check-token')
+  @ApiOperation({
+    summary: 'Kiểm tra trạng thái token của một kênh',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Trả về trạng thái hoạt động của token và thời gian còn lại',
+  })
+  checkTokenStatus(@Param('username') username: string) {
+    return this.pinterestService.checkTokenStatus(username);
+  }
+
+  // ──────────────────────────────────────────────────────────
+  // Scheduled Pin Posting (Pinterest v5 REST API)
+  // ──────────────────────────────────────────────────────────
+
+  @Post('/schedule')
+  @ApiOperation({
+    summary:
+      'Lên lịch đăng pin tự động lên Pinterest qua Pinterest v5 API dựa trên tài khoản kết nối',
+  })
+  @ApiResponse({
+    status: 201,
+    description:
+      'Lên lịch pin thành công — trả về jobName và thời gian chạy',
+  })
+  @ApiResponse({ status: 400, description: 'Lỗi validate hoặc tài khoản không tồn tại' })
+  schedulePin(@Body() dto: SchedulePinDto) {
+    return this.pinterestService.schedulePin(dto);
+  }
+
+  @Get('/schedule')
+  @ApiOperation({
+    summary: 'Xem danh sách các công việc đăng pin đã lên lịch',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Danh sách các công việc đã lên lịch',
+  })
+  getScheduledJobs() {
+    return this.pinterestService.getScheduledJobs();
+  }
+
+  @Delete('/schedule/:jobName')
+  @ApiOperation({
+    summary: 'Hủy lịch trình đăng pin bằng tên job',
+  })
+  @ApiResponse({ status: 200, description: 'Hủy lịch trình thành công' })
+  @ApiResponse({ status: 400, description: 'Không tìm thấy job' })
+  cancelScheduledJob(@Param('jobName') jobName: string) {
+    return this.pinterestService.cancelScheduledJob(jobName);
   }
 }

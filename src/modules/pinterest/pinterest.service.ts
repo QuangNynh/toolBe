@@ -2,7 +2,10 @@
 /* eslint-disable @typescript-eslint/no-unsafe-assignment */
 /* eslint-disable @typescript-eslint/no-unsafe-argument */
 
-import { Injectable, Logger, BadRequestException } from '@nestjs/common';
+import { Injectable, Logger, BadRequestException, NotFoundException } from '@nestjs/common';
+import { SchedulerRegistry } from '@nestjs/schedule';
+import { ConfigService } from '@nestjs/config';
+import { CronJob } from 'cron';
 import { Response } from 'express';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -11,13 +14,17 @@ import * as ffmpeg from 'fluent-ffmpeg';
 import * as ffmpegInstaller from '@ffmpeg-installer/ffmpeg';
 import * as ExcelJS from 'exceljs';
 import { ZipArchive } from 'archiver';
-import axios from 'axios';
+import axios, { AxiosError } from 'axios';
 import { ProxyService } from '../proxy/proxy.service';
+import { SchedulePinDto } from './dto/schedule-pin.dto';
 
 // Set FFmpeg binary path from the bundled installer
 ffmpeg.setFfmpegPath(ffmpegInstaller.path);
 
 const PINTEREST_API_BASE = 'https://www.pinterest.com/resource';
+
+/** Pinterest v5 REST API base URL for authenticated operations */
+const PINTEREST_V5_API = 'https://api.pinterest.com/v5';
 const DEFAULT_HEADERS = {
   'User-Agent':
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -27,11 +34,35 @@ const DEFAULT_HEADERS = {
   Referer: 'https://www.pinterest.com/',
 };
 
+export interface PinterestAccount {
+  username: string;
+  fullName?: string;
+  avatarUrl?: string;
+  accessToken: string;
+  refreshToken: string;
+  expiresAt: number; // timestamp in milliseconds when token expires
+  connectedAt: number; // timestamp when account was connected
+}
+
 @Injectable()
 export class PinterestService {
   private readonly logger = new Logger(PinterestService.name);
+  private readonly accountsFilePath = path.join(process.cwd(), 'data', 'pinterest', 'accounts.json');
 
-  constructor(private readonly proxyService: ProxyService) {}
+  constructor(
+    private readonly proxyService: ProxyService,
+    private readonly schedulerRegistry: SchedulerRegistry,
+    private readonly configService: ConfigService,
+  ) {
+    // Đảm bảo thư mục lưu trữ tài khoản tồn tại
+    const dir = path.dirname(this.accountsFilePath);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+    if (!fs.existsSync(this.accountsFilePath)) {
+      fs.writeFileSync(this.accountsFilePath, JSON.stringify([]), 'utf-8');
+    }
+  }
 
   // ──────────────────────────────────────────────────────────
   // Pinterest Internal API helpers
@@ -1244,5 +1275,484 @@ export class PinterestService {
       .replace(/[^a-zA-Z0-9\s\-_À-ɏḀ-ỿ]/g, '')
       .trim()
       .replace(/\s+/g, '_');
+  }
+
+  // ──────────────────────────────────────────────────────────
+  // Pinterest OAuth2 & Accounts Management (JSON storage)
+  // ──────────────────────────────────────────────────────────
+
+  /**
+   * Đọc danh sách tài khoản liên kết từ file JSON
+   */
+  private readAccounts(): PinterestAccount[] {
+    try {
+      if (!fs.existsSync(this.accountsFilePath)) {
+        return [];
+      }
+      const data = fs.readFileSync(this.accountsFilePath, 'utf-8');
+      return JSON.parse(data) as PinterestAccount[];
+    } catch (error: any) {
+      this.logger.error(`Failed to read accounts file: ${error.message}`);
+      return [];
+    }
+  }
+
+  /**
+   * Ghi danh sách tài khoản liên kết vào file JSON
+   */
+  private writeAccounts(accounts: PinterestAccount[]): void {
+    try {
+      fs.writeFileSync(this.accountsFilePath, JSON.stringify(accounts, null, 2), 'utf-8');
+    } catch (error: any) {
+      this.logger.error(`Failed to write accounts file: ${error.message}`);
+      throw new BadRequestException(`Failed to save accounts storage: ${error.message}`);
+    }
+  }
+
+  /**
+   * Sinh URL Authorization để Client chuyển hướng người dùng sang Pinterest đăng nhập
+   */
+  getAuthUrl() {
+    const clientId = this.configService.get<string>('PINTEREST_CLIENT_ID');
+    const redirectUri = this.configService.get<string>('PINTEREST_REDIRECT_URI');
+
+    if (!clientId || !redirectUri) {
+      throw new BadRequestException(
+        'Missing PINTEREST_CLIENT_ID or PINTEREST_REDIRECT_URI in environment variables.',
+      );
+    }
+
+    const state = Math.random().toString(36).substring(2, 15);
+    // Danh sách các quyền (scopes) cần thiết để đăng Pin và đọc thông tin user
+    const scopes = ['pins:read', 'pins:write', 'boards:read', 'user_accounts:read'].join(',');
+
+    const url = `https://www.pinterest.com/oauth/?consumer_id=${clientId}&redirect_uri=${encodeURIComponent(
+      redirectUri,
+    )}&response_type=code&scope=${scopes}&state=${state}`;
+
+    return { success: true, url, state };
+  }
+
+  /**
+   * Đổi Authorization Code lấy Tokens, gọi API lấy thông tin profile và lưu trữ vào accounts.json
+   */
+  async handleAuthCallback(code: string) {
+    const clientId = this.configService.get<string>('PINTEREST_CLIENT_ID');
+    const clientSecret = this.configService.get<string>('PINTEREST_CLIENT_SECRET');
+    const redirectUri = this.configService.get<string>('PINTEREST_REDIRECT_URI');
+
+    if (!clientId || !clientSecret || !redirectUri) {
+      throw new BadRequestException(
+        'Missing Pinterest OAuth credentials (CLIENT_ID, CLIENT_SECRET, REDIRECT_URI) in env.',
+      );
+    }
+
+    // 1. Gửi request đổi Code lấy Access & Refresh Token
+    const tokenUrl = `${PINTEREST_V5_API}/oauth/token`;
+    // Pinterest OAuth2 sử dụng Basic Auth Header (Base64 clientId:clientSecret)
+    const basicAuth = Buffer.from(`${clientId}:${clientSecret}`).toString('base64');
+
+    const params = new URLSearchParams();
+    params.append('grant_type', 'authorization_code');
+    params.append('code', code);
+    params.append('redirect_uri', redirectUri);
+
+    let tokenData: any;
+    try {
+      const response = await axios.post(tokenUrl, params, {
+        headers: {
+          Authorization: `Basic ${basicAuth}`,
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
+      });
+      tokenData = response.data;
+    } catch (error: any) {
+      const detail = error.response?.data?.message || error.message;
+      this.logger.error(`Failed to exchange auth code: ${JSON.stringify(error.response?.data)}`);
+      throw new BadRequestException(`Failed to exchange Pinterest authorization code: ${detail}`);
+    }
+
+    const accessToken = tokenData.access_token;
+    const refreshToken = tokenData.refresh_token;
+    // expires_in tính bằng giây (thường là 30 ngày)
+    const expiresAt = Date.now() + (tokenData.expires_in || 2592000) * 1000;
+
+    // 2. Gọi API Pinterest lấy thông tin cá nhân của User
+    let userData: any;
+    try {
+      const userResponse = await axios.get(`${PINTEREST_V5_API}/user_account`, {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+        },
+      });
+      userData = userResponse.data;
+    } catch (error: any) {
+      const detail = error.response?.data?.message || error.message;
+      throw new BadRequestException(`Failed to fetch Pinterest user profile: ${detail}`);
+    }
+
+    const username = userData.username;
+    if (!username) {
+      throw new BadRequestException('Could not retrieve username from Pinterest response.');
+    }
+
+    // 3. Lưu trữ tài khoản vào JSON
+    const accounts = this.readAccounts();
+    const existingIndex = accounts.findIndex((acc) => acc.username === username);
+
+    const newAccount: PinterestAccount = {
+      username,
+      fullName: userData.business_name || userData.username,
+      avatarUrl: userData.profile_image || null,
+      accessToken,
+      refreshToken,
+      expiresAt,
+      connectedAt: Date.now(),
+    };
+
+    if (existingIndex > -1) {
+      accounts[existingIndex] = newAccount;
+      this.logger.log(`Updated existing Pinterest account connection for user: ${username}`);
+    } else {
+      accounts.push(newAccount);
+      this.logger.log(`Added new Pinterest account connection for user: ${username}`);
+    }
+
+    this.writeAccounts(accounts);
+
+    return {
+      success: true,
+      message: 'Account connected successfully.',
+      account: {
+        username: newAccount.username,
+        fullName: newAccount.fullName,
+        avatarUrl: newAccount.avatarUrl,
+        connectedAt: newAccount.connectedAt,
+      },
+    };
+  }
+
+  /**
+   * Gọi Pinterest OAuth làm mới token dựa trên Refresh Token
+   */
+  private async refreshAccessToken(account: PinterestAccount): Promise<PinterestAccount> {
+    const clientId = this.configService.get<string>('PINTEREST_CLIENT_ID');
+    const clientSecret = this.configService.get<string>('PINTEREST_CLIENT_SECRET');
+
+    if (!clientId || !clientSecret) {
+      throw new BadRequestException('Pinterest OAuth credentials are not configured in environment.');
+    }
+
+    const tokenUrl = `${PINTEREST_V5_API}/oauth/token`;
+    const basicAuth = Buffer.from(`${clientId}:${clientSecret}`).toString('base64');
+
+    const params = new URLSearchParams();
+    params.append('grant_type', 'refresh_token');
+    params.append('refresh_token', account.refreshToken);
+
+    try {
+      this.logger.log(`Refreshing access token for Pinterest account: ${account.username}`);
+      const response = await axios.post(tokenUrl, params, {
+        headers: {
+          Authorization: `Basic ${basicAuth}`,
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
+      });
+
+      const tokenData = response.data;
+      account.accessToken = tokenData.access_token;
+      // update expiry time
+      account.expiresAt = Date.now() + (tokenData.expires_in || 2592000) * 1000;
+
+      // Nếu Pinterest trả về refresh_token mới thì lưu lại, nếu không thì giữ nguyên refresh_token cũ
+      if (tokenData.refresh_token) {
+        account.refreshToken = tokenData.refresh_token;
+      }
+
+      return account;
+    } catch (error: any) {
+      const detail = error.response?.data?.message || error.message;
+      this.logger.error(
+        `Failed to refresh access token for user ${account.username}: ${JSON.stringify(
+          error.response?.data,
+        )}`,
+      );
+      throw new BadRequestException(
+        `Token refresh failed for account "${account.username}". Client may need to re-authenticate. Detail: ${detail}`,
+      );
+    }
+  }
+
+  /**
+   * Lấy Access Token hợp lệ của User.
+   * Nếu hết hạn hoặc sắp hết hạn (dưới 5 phút), tự động gia hạn trước khi trả về.
+   */
+  async getAccessTokenForUser(username: string): Promise<string> {
+    const accounts = this.readAccounts();
+    const accountIndex = accounts.findIndex((acc) => acc.username === username);
+
+    if (accountIndex === -1) {
+      throw new NotFoundException(`Pinterest account with username "${username}" not connected.`);
+    }
+
+    let account = accounts[accountIndex];
+    const BUFFER_TIME = 5 * 60 * 1000; // 5 minutes buffer
+
+    // Nếu token hết hạn hoặc sắp hết hạn
+    if (Date.now() + BUFFER_TIME >= account.expiresAt) {
+      try {
+        account = await this.refreshAccessToken(account);
+        accounts[accountIndex] = account;
+        this.writeAccounts(accounts);
+      } catch (err: any) {
+        this.logger.error(`Auto refresh token failed for ${username}: ${err.message}`);
+        throw new BadRequestException(
+          `Pinterest token expired for "${username}" and refresh failed. Please re-authenticate.`,
+        );
+      }
+    }
+
+    return account.accessToken;
+  }
+
+  /**
+   * Trả về danh sách kênh đã liên kết (Ẩn tokens)
+   */
+  getConnectedChannels() {
+    const accounts = this.readAccounts();
+    const sanitized = accounts.map((acc) => ({
+      username: acc.username,
+      fullName: acc.fullName,
+      avatarUrl: acc.avatarUrl,
+      connectedAt: acc.connectedAt,
+      expiresAt: acc.expiresAt,
+      isExpired: Date.now() >= acc.expiresAt,
+    }));
+
+    return {
+      success: true,
+      count: sanitized.length,
+      channels: sanitized,
+    };
+  }
+
+  /**
+   * Hủy kết nối kênh Pinterest (Xóa khỏi JSON)
+   */
+  disconnectChannel(username: string) {
+    const accounts = this.readAccounts();
+    const filtered = accounts.filter((acc) => acc.username !== username);
+
+    if (accounts.length === filtered.length) {
+      throw new NotFoundException(`Pinterest account with username "${username}" was not found.`);
+    }
+
+    this.writeAccounts(filtered);
+    this.logger.log(`Disconnected Pinterest account: ${username}`);
+
+    return {
+      success: true,
+      message: `Pinterest account "${username}" has been disconnected.`,
+    };
+  }
+
+  /**
+   * Kiểm tra thủ công token có hoạt động hay không và còn bao nhiêu giây
+   */
+  async checkTokenStatus(username: string) {
+    const accounts = this.readAccounts();
+    const account = accounts.find((acc) => acc.username === username);
+
+    if (!account) {
+      throw new NotFoundException(`Pinterest account with username "${username}" not connected.`);
+    }
+
+    const isExpired = Date.now() >= account.expiresAt;
+    const timeLeftSeconds = Math.max(0, Math.floor((account.expiresAt - Date.now()) / 1000));
+
+    // Thực hiện test call nhỏ tới api Pinterest để kiểm tra xem token còn thực sự active hay không
+    let isWorking = false;
+    let errorMessage = '';
+
+    try {
+      await axios.get(`${PINTEREST_V5_API}/user_account`, {
+        headers: {
+          Authorization: `Bearer ${account.accessToken}`,
+        },
+      });
+      isWorking = true;
+    } catch (error: any) {
+      isWorking = false;
+      errorMessage = error.response?.data?.message || error.message;
+    }
+
+    return {
+      success: true,
+      username,
+      isExpired,
+      timeLeftSeconds,
+      isWorking,
+      errorMessage: isWorking ? null : errorMessage,
+    };
+  }
+
+  // ──────────────────────────────────────────────────────────
+  // Pinterest v5 API: Scheduled Pin Posting
+  // ──────────────────────────────────────────────────────────
+
+  /**
+   * Schedule a pin to be published at a future ISO 8601 timestamp.
+   *
+   * Creates a one-shot CronJob via SchedulerRegistry. When the
+   * job fires it POSTs to the Pinterest v5 /pins endpoint, then
+   * immediately deletes itself from the registry to free memory.
+   */
+  async schedulePin(dto: SchedulePinDto) {
+    // Check if user account exists to fail fast
+    await this.getAccessTokenForUser(dto.username);
+
+    const fireDate = new Date(dto.scheduleTime);
+    const jobName = `pin-${dto.boardId}-${fireDate.getTime()}`;
+
+    // Guard: prevent duplicate jobs for the exact same board + time
+    if (this.schedulerRegistry.doesExist('cron', jobName)) {
+      throw new BadRequestException(
+        `A scheduled pin already exists for board ${dto.boardId} at ${dto.scheduleTime}. ` +
+          `Delete it first or choose a different time.`,
+      );
+    }
+
+    const job = CronJob.from({
+      cronTime: fireDate,
+      onTick: async () => {
+        this.logger.log(`[Scheduler] Firing scheduled pin job: ${jobName}`);
+        try {
+          // Lấy access token hợp lệ (nếu sắp hết hạn, getAccessTokenForUser sẽ tự refresh)
+          const token = await this.getAccessTokenForUser(dto.username);
+          const result = await this.postPinToV5Api(dto, token);
+          this.logger.log(
+            `[Scheduler] Pin posted successfully. Pin ID: ${result.id}`,
+          );
+        } catch (error: any) {
+          this.logger.error(
+            `[Scheduler] Failed to post pin for job "${jobName}": ${error.message}`,
+            error.stack,
+          );
+        } finally {
+          // One-shot: remove the job from the registry after execution
+          this.schedulerRegistry.deleteCronJob(jobName);
+          this.logger.log(`[Scheduler] Cleaned up job: ${jobName}`);
+        }
+      },
+      start: false, // we start it explicitly after registration
+      timeZone: 'UTC',
+    });
+
+    this.schedulerRegistry.addCronJob(jobName, job);
+    job.start();
+
+    this.logger.log(
+      `[Scheduler] Registered job "${jobName}" — will fire at ${fireDate.toISOString()}`,
+    );
+
+    return {
+      success: true,
+      jobName,
+      scheduledFor: fireDate.toISOString(),
+      boardId: dto.boardId,
+      title: dto.title,
+    };
+  }
+
+  /**
+   * POST a pin to the Pinterest v5 REST API.
+   *
+   * Endpoint: POST https://api.pinterest.com/v5/pins
+   * Docs:     https://developers.pinterest.com/docs/api/v5/#tag/pins/post/pins
+   */
+  private async postPinToV5Api(
+    dto: SchedulePinDto,
+    bearerToken: string,
+  ): Promise<{ id: string }> {
+    const payload: Record<string, any> = {
+      board_id: dto.boardId,
+      title: dto.title,
+      description: dto.description,
+      media_source: {
+        source_type: 'image_url',
+        url: dto.imageUrl,
+      },
+    };
+
+    // Attach optional fields only if provided
+    if (dto.link) payload.link = dto.link;
+    if (dto.altText) payload.alt_text = dto.altText;
+
+    try {
+      const response = await axios.post(`${PINTEREST_V5_API}/pins`, payload, {
+        headers: {
+          Authorization: `Bearer ${bearerToken}`,
+          'Content-Type': 'application/json',
+        },
+        timeout: 30_000,
+      });
+
+      return response.data;
+    } catch (error) {
+      if (error instanceof AxiosError) {
+        const status = error.response?.status;
+        const detail =
+          error.response?.data?.message ||
+          error.response?.data?.error?.message ||
+          error.message;
+
+        this.logger.error(
+          `Pinterest v5 API error [${status}]: ${JSON.stringify(error.response?.data)}`,
+        );
+
+        throw new BadRequestException(
+          `Pinterest API responded with ${status}: ${detail}`,
+        );
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * List all currently-registered scheduled pin jobs.
+   */
+  getScheduledJobs() {
+    const jobs = this.schedulerRegistry.getCronJobs();
+    const result: { jobName: string; nextFireTime: string | null }[] = [];
+
+    jobs.forEach((job, name) => {
+      // Only include pin-scheduling jobs (not unrelated crons)
+      if (name.startsWith('pin-')) {
+        const next = job.nextDate();
+        result.push({
+          jobName: name,
+          nextFireTime: next ? next.toISO() : null,
+        });
+      }
+    });
+
+    return { success: true, count: result.length, jobs: result };
+  }
+
+  /**
+   * Cancel a scheduled pin job by its name and remove it
+   * from the registry.
+   */
+  cancelScheduledJob(jobName: string) {
+    if (!this.schedulerRegistry.doesExist('cron', jobName)) {
+      throw new BadRequestException(
+        `No scheduled job found with name "${jobName}"`,
+      );
+    }
+
+    this.schedulerRegistry.deleteCronJob(jobName);
+    this.logger.log(`[Scheduler] Cancelled and removed job: ${jobName}`);
+
+    return { success: true, message: `Job "${jobName}" has been cancelled.` };
   }
 }

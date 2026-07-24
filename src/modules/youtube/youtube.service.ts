@@ -1,7 +1,8 @@
 /* eslint-disable @typescript-eslint/no-unsafe-member-access */
 /* eslint-disable @typescript-eslint/no-unsafe-assignment */
  
-import { BadRequestException, Injectable, OnModuleInit } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger, NotFoundException, OnModuleInit } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import axios from 'axios';
 import { exec, spawn } from 'child_process';
 import { Response } from 'express';
@@ -10,6 +11,7 @@ import * as fs from 'fs';
 import { HttpsProxyAgent } from 'https-proxy-agent';
 import * as os from 'os';
 import * as path from 'path';
+import { Readable } from 'stream';
 import pLimit from 'p-limit';
 import * as sharp from 'sharp';
 import { promisify } from 'util';
@@ -18,7 +20,21 @@ import { fetchTranscript } from 'youtube-transcript-plus';
 import { Innertube } from 'youtubei.js';
 import type VideoInfo from 'youtubei.js/dist/src/parser/youtube/VideoInfo';
 import { ProxyService } from '../proxy/proxy.service';
+import { google } from 'googleapis';
+import { ScheduleYoutubeDto } from './dto/schedule-youtube.dto';
+import { GetChannelVideosApiDto } from './dto/get-channel-videos-api.dto';
+import { UploadThumbnailDto } from './dto/upload-thumbnail.dto';
 import SrtParser2 from 'srt-parser-2';
+
+export interface YouTubeChannel {
+  channelId: string;
+  channelTitle: string;
+  thumbnailUrl?: string;
+  refreshToken: string;
+  accessToken?: string;
+  expiresAt: number;   // timestamp in ms when access token expires
+  connectedAt: number; // timestamp when channel was connected
+}
 
 const execPromise = promisify(exec);
 
@@ -26,8 +42,21 @@ const execPromise = promisify(exec);
 export class YoutubeService implements OnModuleInit {
   private youtube: Innertube;
   private proxyAgent: any;
+  private readonly channelsFilePath = path.join(process.cwd(), 'data', 'youtube', 'channels.json');
 
-  constructor(private readonly proxyService: ProxyService) {}
+  constructor(
+    private readonly proxyService: ProxyService,
+    private readonly configService: ConfigService,
+  ) {
+    // Đảm bảo thư mục lưu trữ kênh tồn tại
+    const dir = path.dirname(this.channelsFilePath);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+    if (!fs.existsSync(this.channelsFilePath)) {
+      fs.writeFileSync(this.channelsFilePath, JSON.stringify([]), 'utf-8');
+    }
+  }
 
   async onModuleInit() {
     // Suppress youtubei.js parsing warnings for "Remove ads" elements
@@ -928,5 +957,693 @@ export class YoutubeService implements OnModuleInit {
         resolve(!(isH264 && isAac && isYuv420p));
       });
     });
+  }
+
+  // ──────────────────────────────────────────────────────────
+  // YouTube OAuth2 & Channels Management (JSON storage)
+  // ──────────────────────────────────────────────────────────
+
+  /**
+   * Đọc danh sách kênh đã liên kết từ file JSON
+   */
+  private readChannels(): YouTubeChannel[] {
+    try {
+      if (!fs.existsSync(this.channelsFilePath)) {
+        return [];
+      }
+      const data = fs.readFileSync(this.channelsFilePath, 'utf-8');
+      return JSON.parse(data) as YouTubeChannel[];
+    } catch (error: any) {
+      this.scheduleLogger.error(`Failed to read channels file: ${error.message}`);
+      return [];
+    }
+  }
+
+  /**
+   * Ghi danh sách kênh đã liên kết vào file JSON
+   */
+  private writeChannels(channels: YouTubeChannel[]): void {
+    try {
+      fs.writeFileSync(this.channelsFilePath, JSON.stringify(channels, null, 2), 'utf-8');
+    } catch (error: any) {
+      this.scheduleLogger.error(`Failed to write channels file: ${error.message}`);
+      throw new BadRequestException(`Failed to save channels storage: ${error.message}`);
+    }
+  }
+
+  /**
+   * Tạo OAuth2 client instance từ env
+   */
+  private createOAuth2Client() {
+    const clientId =
+      this.configService.get<string>('YOUTUBE_CLIENT_ID') ||
+      this.configService.get<string>('GOOGLE_CLIENT_ID');
+    const clientSecret =
+      this.configService.get<string>('YOUTUBE_CLIENT_SECRET') ||
+      this.configService.get<string>('GOOGLE_CLIENT_SECRET');
+    const redirectUri =
+      this.configService.get<string>('YOUTUBE_REDIRECT_URI') ||
+      this.configService.get<string>('GOOGLE_REDIRECT_URI') ||
+      'http://localhost:3000/youtube/callback';
+
+    if (!clientId || !clientSecret) {
+      throw new BadRequestException(
+        'Missing YouTube/Google Client ID or Client Secret in environment variables.',
+      );
+    }
+
+    return new google.auth.OAuth2(clientId, clientSecret, redirectUri);
+  }
+
+  /**
+   * Sinh URL Authorization để Client chuyển hướng người dùng sang Google đăng nhập
+   */
+  getAuthUrl(): string {
+    const oauth2Client = this.createOAuth2Client();
+
+    const scopes = [
+      'https://www.googleapis.com/auth/youtube.force-ssl',
+      'https://www.googleapis.com/auth/youtube.readonly',
+    ];
+
+    const url = oauth2Client.generateAuthUrl({
+      access_type: 'offline',
+      scope: scopes,
+      prompt: 'consent', // Luôn yêu cầu consent để nhận refresh_token mới
+    });
+
+    return url;
+  }
+
+  /**
+   * Đổi Authorization Code lấy Tokens, gọi YouTube API lấy thông tin kênh, lưu vào channels.json và trả về refresh_token.
+   */
+  async handleCallback(code: string): Promise<string> {
+    const oauth2Client = this.createOAuth2Client();
+
+    // 1. Đổi Code lấy Tokens
+    let tokens: any;
+    try {
+      const { tokens: t } = await oauth2Client.getToken(code);
+      tokens = t;
+    } catch (error: any) {
+      const detail = error.response?.data?.error_description || error.message;
+      this.scheduleLogger.error(`Failed to exchange auth code: ${JSON.stringify(error.response?.data)}`);
+      throw new BadRequestException(`Failed to exchange Google authorization code: ${detail}`);
+    }
+
+    if (!tokens.refresh_token) {
+      throw new BadRequestException(
+        'No refresh_token received. Make sure to use prompt=consent and access_type=offline in the auth URL.',
+      );
+    }
+
+    oauth2Client.setCredentials(tokens);
+
+    // 2. Gọi YouTube API lấy thông tin kênh
+    let channelData: any;
+    try {
+      const yt = google.youtube({ version: 'v3', auth: oauth2Client });
+      const response = await yt.channels.list({
+        part: ['snippet', 'contentDetails'],
+        mine: true,
+      });
+      channelData = response.data.items?.[0];
+    } catch (error: any) {
+      const detail = error.response?.data?.error?.message || error.message;
+      throw new BadRequestException(`Failed to fetch YouTube channel info: ${detail}`);
+    }
+
+    if (!channelData) {
+      throw new BadRequestException('Could not retrieve channel information from YouTube.');
+    }
+
+    const channelId = channelData.id;
+    const channelTitle = channelData.snippet?.title || channelId;
+    const thumbnailUrl = channelData.snippet?.thumbnails?.default?.url || null;
+
+    // 3. Lưu trữ kênh vào JSON
+    const channels = this.readChannels();
+    const existingIndex = channels.findIndex((ch) => ch.channelId === channelId);
+
+    const newChannel: YouTubeChannel = {
+      channelId,
+      channelTitle,
+      thumbnailUrl,
+      refreshToken: tokens.refresh_token,
+      accessToken: tokens.access_token,
+      expiresAt: tokens.expiry_date || (Date.now() + 3600 * 1000),
+      connectedAt: Date.now(),
+    };
+
+    if (existingIndex > -1) {
+      channels[existingIndex] = newChannel;
+      this.scheduleLogger.log(`Updated existing YouTube channel connection: ${channelTitle} (${channelId})`);
+    } else {
+      channels.push(newChannel);
+      this.scheduleLogger.log(`Added new YouTube channel connection: ${channelTitle} (${channelId})`);
+    }
+
+    this.writeChannels(channels);
+
+    return tokens.refresh_token;
+  }
+
+  /**
+   * Đổi Authorization Code lấy Tokens, gọi YouTube API lấy thông tin kênh và lưu vào channels.json
+   * (Method này được giữ lại để tương thích ngược)
+   */
+  async handleAuthCallback(code: string) {
+    const oauth2Client = this.createOAuth2Client();
+
+    // 1. Đổi Code lấy Tokens
+    let tokens: any;
+    try {
+      const { tokens: t } = await oauth2Client.getToken(code);
+      tokens = t;
+    } catch (error: any) {
+      const detail = error.response?.data?.error_description || error.message;
+      this.scheduleLogger.error(`Failed to exchange auth code: ${JSON.stringify(error.response?.data)}`);
+      throw new BadRequestException(`Failed to exchange Google authorization code: ${detail}`);
+    }
+
+    if (!tokens.refresh_token) {
+      throw new BadRequestException(
+        'No refresh_token received. Make sure to use prompt=consent and access_type=offline in the auth URL.',
+      );
+    }
+
+    oauth2Client.setCredentials(tokens);
+
+    // 2. Gọi YouTube API lấy thông tin kênh
+    let channelData: any;
+    try {
+      const yt = google.youtube({ version: 'v3', auth: oauth2Client });
+      const response = await yt.channels.list({
+        part: ['snippet', 'contentDetails'],
+        mine: true,
+      });
+      channelData = response.data.items?.[0];
+    } catch (error: any) {
+      const detail = error.response?.data?.error?.message || error.message;
+      throw new BadRequestException(`Failed to fetch YouTube channel info: ${detail}`);
+    }
+
+    if (!channelData) {
+      throw new BadRequestException('Could not retrieve channel information from YouTube.');
+    }
+
+    const channelId = channelData.id;
+    const channelTitle = channelData.snippet?.title || channelId;
+    const thumbnailUrl = channelData.snippet?.thumbnails?.default?.url || null;
+
+    // 3. Lưu trữ kênh vào JSON
+    const channels = this.readChannels();
+    const existingIndex = channels.findIndex((ch) => ch.channelId === channelId);
+
+    const newChannel: YouTubeChannel = {
+      channelId,
+      channelTitle,
+      thumbnailUrl,
+      refreshToken: tokens.refresh_token,
+      accessToken: tokens.access_token,
+      expiresAt: tokens.expiry_date || (Date.now() + 3600 * 1000),
+      connectedAt: Date.now(),
+    };
+
+    if (existingIndex > -1) {
+      channels[existingIndex] = newChannel;
+      this.scheduleLogger.log(`Updated existing YouTube channel connection: ${channelTitle} (${channelId})`);
+    } else {
+      channels.push(newChannel);
+      this.scheduleLogger.log(`Added new YouTube channel connection: ${channelTitle} (${channelId})`);
+    }
+
+    this.writeChannels(channels);
+
+    return {
+      success: true,
+      message: 'YouTube channel connected successfully.',
+      channel: {
+        channelId: newChannel.channelId,
+        channelTitle: newChannel.channelTitle,
+        thumbnailUrl: newChannel.thumbnailUrl,
+        connectedAt: newChannel.connectedAt,
+      },
+    };
+  }
+
+  /**
+   * Lấy refresh token hợp lệ của Channel, tự động refresh access token nếu sắp/đã hết hạn
+   */
+  async getRefreshTokenForChannel(channelId: string): Promise<string> {
+    const channels = this.readChannels();
+    const channelIndex = channels.findIndex((ch) => ch.channelId === channelId);
+
+    if (channelIndex === -1) {
+      throw new NotFoundException(`YouTube channel "${channelId}" is not connected.`);
+    }
+
+    const channel = channels[channelIndex];
+
+    // Auto-refresh access token nếu sắp hết hạn (buffer 5 phút)
+    const BUFFER_TIME = 5 * 60 * 1000;
+    if (Date.now() + BUFFER_TIME >= channel.expiresAt) {
+      try {
+        const oauth2Client = this.createOAuth2Client();
+        oauth2Client.setCredentials({ refresh_token: channel.refreshToken });
+        const { credentials } = await oauth2Client.refreshAccessToken();
+
+        channel.accessToken = credentials.access_token || undefined;
+        channel.expiresAt = credentials.expiry_date || (Date.now() + 3600 * 1000);
+
+        // Google có thể trả refresh_token mới (hiếm khi)
+        if (credentials.refresh_token) {
+          channel.refreshToken = credentials.refresh_token;
+        }
+
+        channels[channelIndex] = channel;
+        this.writeChannels(channels);
+        this.scheduleLogger.log(`Refreshed access token for YouTube channel: ${channelId}`);
+      } catch (err: any) {
+        this.scheduleLogger.error(`Auto refresh token failed for ${channelId}: ${err.message}`);
+        throw new BadRequestException(
+          `YouTube token expired for "${channelId}" and refresh failed. Please re-authenticate.`,
+        );
+      }
+    }
+
+    return channel.refreshToken;
+  }
+
+  /**
+   * Trả về danh sách kênh đã liên kết (Ẩn tokens)
+   */
+  getConnectedChannels() {
+    const channels = this.readChannels();
+    const sanitized = channels.map((ch) => ({
+      channelId: ch.channelId,
+      channelTitle: ch.channelTitle,
+      thumbnailUrl: ch.thumbnailUrl,
+      connectedAt: ch.connectedAt,
+      expiresAt: ch.expiresAt,
+      isExpired: Date.now() >= ch.expiresAt,
+    }));
+
+    return {
+      success: true,
+      count: sanitized.length,
+      channels: sanitized,
+    };
+  }
+
+  /**
+   * Hủy kết nối kênh YouTube (Xóa khỏi JSON)
+   */
+  disconnectChannel(channelId: string) {
+    const channels = this.readChannels();
+    const filtered = channels.filter((ch) => ch.channelId !== channelId);
+
+    if (channels.length === filtered.length) {
+      throw new NotFoundException(`YouTube channel "${channelId}" was not found.`);
+    }
+
+    this.writeChannels(filtered);
+    this.scheduleLogger.log(`Disconnected YouTube channel: ${channelId}`);
+
+    return {
+      success: true,
+      message: `YouTube channel "${channelId}" has been disconnected.`,
+    };
+  }
+
+  /**
+   * Kiểm tra thủ công token có hoạt động hay không và còn bao nhiêu giây
+   */
+  async checkTokenStatus(channelId: string) {
+    const channels = this.readChannels();
+    const channel = channels.find((ch) => ch.channelId === channelId);
+
+    if (!channel) {
+      throw new NotFoundException(`YouTube channel "${channelId}" is not connected.`);
+    }
+
+    const isExpired = Date.now() >= channel.expiresAt;
+    const timeLeftSeconds = Math.max(0, Math.floor((channel.expiresAt - Date.now()) / 1000));
+
+    // Test call nhỏ tới YouTube API để kiểm tra token
+    let isWorking = false;
+    let errorMessage = '';
+
+    try {
+      const oauth2Client = this.createOAuth2Client();
+      oauth2Client.setCredentials({ refresh_token: channel.refreshToken });
+
+      // Nếu access token hết hạn, thử refresh trước
+      if (isExpired) {
+        const { credentials } = await oauth2Client.refreshAccessToken();
+        oauth2Client.setCredentials(credentials);
+      } else if (channel.accessToken) {
+        oauth2Client.setCredentials({
+          refresh_token: channel.refreshToken,
+          access_token: channel.accessToken,
+        });
+      }
+
+      const yt = google.youtube({ version: 'v3', auth: oauth2Client });
+      await yt.channels.list({ part: ['id'], mine: true });
+      isWorking = true;
+    } catch (error: any) {
+      isWorking = false;
+      errorMessage = error.response?.data?.error?.message || error.message;
+    }
+
+    return {
+      success: true,
+      channelId,
+      channelTitle: channel.channelTitle,
+      isExpired,
+      timeLeftSeconds,
+      isWorking,
+      errorMessage: isWorking ? null : errorMessage,
+    };
+  }
+
+  // ──────────────────────────────────────────────────────────
+  // YouTube Data API v3: Scheduled Video Publishing
+  // ──────────────────────────────────────────────────────────
+
+  private readonly scheduleLogger = new Logger('YoutubeScheduler');
+
+  /**
+   * Lên lịch tự động public một video YouTube đang ở trạng thái Private.
+   *
+   * Cơ chế multi-channel (mô hình Pinterest):
+   * - Mỗi kênh YouTube đã kết nối sẽ được lưu trong data/youtube/channels.json
+   *   kèm refresh_token.
+   * - Client chỉ cần gửi channelId — backend tự lookup refresh token từ JSON storage,
+   *   khởi tạo OAuth2 client, và gọi YouTube Data API dưới danh nghĩa kênh tương ứng.
+   * - Token sẽ được tự động refresh khi sắp hết hạn.
+   *
+   * YouTube sẽ tự động chuyển video sang "public" khi đến thời điểm publishAt.
+   * Điều kiện: video phải đang ở trạng thái "private" (không phải "unlisted").
+   */
+  async scheduleVideo(dto: ScheduleYoutubeDto) {
+    // Lấy refresh token từ storage (tự auto-refresh nếu sắp hết hạn)
+    const refreshToken = await this.getRefreshTokenForChannel(dto.channelId);
+
+    // Khởi tạo OAuth2 client với refresh token từ storage
+    const oauth2Client = this.createOAuth2Client();
+    oauth2Client.setCredentials({ refresh_token: refreshToken });
+
+    const youtube = google.youtube({ version: 'v3', auth: oauth2Client });
+
+    this.scheduleLogger.log(
+      `Scheduling video "${dto.videoId}" on channel "${dto.channelId}" to publish at ${dto.publishTime}`,
+    );
+
+    try {
+      // 1. Lấy thông tin video hiện tại để lấy categoryId gốc của nó
+      const videoInfo = await youtube.videos.list({
+        part: ['snippet'],
+        id: [dto.videoId],
+      });
+
+      const currentVideo = videoInfo.data.items?.[0];
+      if (!currentVideo) {
+        throw new NotFoundException(`Video "${dto.videoId}" not found on YouTube.`);
+      }
+
+      const categoryId = currentVideo.snippet?.categoryId || '22'; // 22 là category mặc định "People & Blogs" làm fallback
+
+      // 2. Thực hiện cập nhật thông tin và lên lịch video
+      const response = await youtube.videos.update({
+        part: ['snippet', 'status'],
+        requestBody: {
+          id: dto.videoId,
+          snippet: {
+            title: dto.title,
+            description: dto.description,
+            tags: dto.tags,
+            categoryId: categoryId, // Truyền categoryId hiện tại để tránh lỗi API
+          },
+          status: {
+            privacyStatus: 'private',
+            publishAt: dto.publishTime,
+          },
+        },
+      });
+
+      const video = response.data;
+
+      this.scheduleLogger.log(
+        `Video "${dto.videoId}" scheduled successfully. ` +
+          `Title: "${video.snippet?.title}", ` +
+          `Publish at: ${video.status?.publishAt}`,
+      );
+
+      return {
+        success: true,
+        videoId: video.id,
+        title: video.snippet?.title,
+        channelId: video.snippet?.channelId,
+        channelTitle: video.snippet?.channelTitle,
+        publishAt: video.status?.publishAt,
+        privacyStatus: video.status?.privacyStatus,
+      };
+    } catch (error: any) {
+      const status = error.response?.status || error.code;
+      const message =
+        error.response?.data?.error?.message ||
+        error.errors?.[0]?.message ||
+        error.message;
+
+      this.scheduleLogger.error(
+        `Failed to schedule video "${dto.videoId}": [${status}] ${message}`,
+        error.stack,
+      );
+
+      throw new BadRequestException(
+        `YouTube API error [${status}]: ${message}`,
+      );
+    }
+  }
+
+  /**
+   * Lấy danh sách video của một kênh YouTube đã liên kết.
+   *
+   * Sử dụng Playlist "uploads" đặc biệt của kênh để duyệt qua toàn bộ video,
+   * kể cả các video đang ở trạng thái Private hay Unlisted (thích hợp cho quản trị).
+   */
+  async getVideos(dto: GetChannelVideosApiDto) {
+    const refreshToken = await this.getRefreshTokenForChannel(dto.channelId);
+    const oauth2Client = this.createOAuth2Client();
+    oauth2Client.setCredentials({ refresh_token: refreshToken });
+
+    const youtube = google.youtube({ version: 'v3', auth: oauth2Client });
+
+    try {
+      // 1. Lấy thông tin uploads playlist ID của kênh
+      const channelResponse = await youtube.channels.list({
+        part: ['contentDetails'],
+        id: [dto.channelId],
+      });
+
+      const channel = channelResponse.data.items?.[0];
+      if (!channel) {
+        throw new NotFoundException(`YouTube channel "${dto.channelId}" was not found on YouTube.`);
+      }
+
+      const uploadsPlaylistId = channel.contentDetails?.relatedPlaylists?.uploads;
+      if (!uploadsPlaylistId) {
+        throw new BadRequestException(`Could not retrieve uploads playlist for channel ${dto.channelId}.`);
+      }
+
+      // 2. Lấy danh sách video sơ bộ từ playlist uploads
+      const playlistResponse = await youtube.playlistItems.list({
+        part: ['snippet', 'status', 'contentDetails'],
+        playlistId: uploadsPlaylistId,
+        maxResults: dto.maxResults || 10,
+        pageToken: dto.pageToken,
+      });
+
+      const items = playlistResponse.data.items || [];
+      const videoIds = items.map((item) => item.contentDetails?.videoId).filter(Boolean) as string[];
+
+      // 3. Gọi thêm Videos.list để lấy thông tin chi tiết trạng thái lên lịch (publishAt)
+      let detailedVideosMap = new Map<string, any>();
+      if (videoIds.length > 0) {
+        try {
+          const videosResponse = await youtube.videos.list({
+            part: ['status', 'liveStreamingDetails', 'snippet'],
+            id: videoIds,
+          });
+          const detailedItems = videosResponse.data.items || [];
+          detailedItems.forEach((v) => {
+            if (v.id) detailedVideosMap.set(v.id, v);
+          });
+        } catch (err) {
+          this.scheduleLogger.warn(`Failed to fetch detailed video status: ${err.message}`);
+        }
+      }
+
+      // 4. Map gộp dữ liệu từ playlistItems và videos.list
+      let videos = items.map((item) => {
+        const snippet = item.snippet;
+        const status = item.status;
+        const contentDetails = item.contentDetails;
+        const videoId = contentDetails?.videoId || item.id || '';
+
+        // Dữ liệu chi tiết lấy từ videos.list
+        const detailedVideo = detailedVideosMap.get(videoId);
+
+        // publishAt là thời gian lên lịch công chiếu chuyển từ Private -> Public
+        const publishAt = detailedVideo?.status?.publishAt || null;
+
+        // scheduledStartTime là thời gian lên lịch phát dưới dạng Premiere công chiếu trực tiếp
+        const scheduledStartTime = detailedVideo?.liveStreamingDetails?.scheduledStartTime || null;
+
+        return {
+          id: videoId,
+          title: snippet?.title || '',
+          description: snippet?.description || '',
+          thumbnailUrl:
+            snippet?.thumbnails?.maxres?.url ||
+            snippet?.thumbnails?.standard?.url ||
+            snippet?.thumbnails?.high?.url ||
+            snippet?.thumbnails?.medium?.url ||
+            snippet?.thumbnails?.default?.url ||
+            null,
+          publishedAt: contentDetails?.videoPublishedAt || snippet?.publishedAt || null,
+          privacyStatus: detailedVideo?.status?.privacyStatus || status?.privacyStatus || 'unknown',
+          publishAt: publishAt, // Thời gian hẹn giờ public (Lịch công chiếu)
+          scheduledStartTime: scheduledStartTime, // Thời gian hẹn Premiere (nếu có)
+          raw: {
+            ...item,
+            detailedStatus: detailedVideo?.status || null,
+            liveStreamingDetails: detailedVideo?.liveStreamingDetails || null,
+          },
+        };
+      });
+
+      // Lọc theo trạng thái quyền riêng tư nếu được truyền vào
+      if (dto.privacyStatus) {
+        const filterStatus = dto.privacyStatus.toLowerCase();
+        videos = videos.filter((v) => v.privacyStatus === filterStatus);
+      }
+
+      return {
+        success: true,
+        channelId: dto.channelId,
+        totalResults: playlistResponse.data.pageInfo?.totalResults || 0,
+        resultsPerPage: playlistResponse.data.pageInfo?.resultsPerPage || 0,
+        nextPageToken: playlistResponse.data.nextPageToken || null,
+        prevPageToken: playlistResponse.data.prevPageToken || null,
+        videos,
+      };
+    } catch (error: any) {
+      const status = error.response?.status || error.code;
+      const message =
+        error.response?.data?.error?.message ||
+        error.errors?.[0]?.message ||
+        error.message;
+
+      this.scheduleLogger.error(
+        `Failed to fetch videos for channel "${dto.channelId}": [${status}] ${message}`,
+        error.stack,
+      );
+
+      throw new BadRequestException(
+        `YouTube API error [${status}]: ${message}`,
+      );
+    }
+  }
+
+  /**
+   * Cập nhật ảnh thumbnail cho video YouTube bằng file upload trực tiếp
+   */
+  async updateThumbnail(dto: UploadThumbnailDto, file?: Express.Multer.File) {
+    const { channelId, videoId } = dto;
+
+    if (!file) {
+      throw new BadRequestException('Vui lòng tải lên file ảnh làm thumbnail.');
+    }
+
+    let imageBuffer: Buffer;
+    let mimeType = 'image/jpeg';
+    const tempFilePathToDelete = file.path;
+
+    try {
+      // 1. Kiểm tra và đọc file upload
+      if (!fs.existsSync(file.path)) {
+        throw new BadRequestException('File tải lên không tồn tại trên server.');
+      }
+
+      const stats = fs.statSync(file.path);
+      if (stats.size > 2 * 1024 * 1024) {
+        throw new BadRequestException('Dung lượng ảnh thumbnail phải nhỏ hơn 2MB.');
+      }
+
+      mimeType = file.mimetype;
+      imageBuffer = fs.readFileSync(file.path);
+
+      // 2. Khởi tạo YouTube API client đã xác thực cho kênh
+      const refreshToken = await this.getRefreshTokenForChannel(channelId);
+      const oauth2Client = this.createOAuth2Client();
+      oauth2Client.setCredentials({ refresh_token: refreshToken });
+      const youtube = google.youtube({ version: 'v3', auth: oauth2Client });
+
+      this.scheduleLogger.log(`Đang tải ảnh thumbnail lên video "${videoId}" của kênh "${channelId}"`);
+
+      // Chuyển buffer thành readable stream để googleapis xử lý upload
+      const stream = new Readable({
+        read() {
+          this.push(imageBuffer);
+          this.push(null);
+        },
+      });
+
+      // 3. Gọi API thumbnails.set của YouTube Data API v3
+      const apiResponse = await youtube.thumbnails.set({
+        videoId,
+        media: {
+          mimeType,
+          body: stream,
+        },
+      });
+
+      this.scheduleLogger.log(`Đã cập nhật thumbnail thành công cho video "${videoId}"`);
+
+      return {
+        success: true,
+        videoId,
+        channelId,
+        thumbnailUrl: apiResponse.data.items?.[0]?.default?.url || null,
+        data: apiResponse.data,
+      };
+
+    } catch (error: any) {
+      const status = error.response?.status || error.code || 500;
+      const message =
+        error.response?.data?.error?.message ||
+        error.errors?.[0]?.message ||
+        error.message;
+
+      this.scheduleLogger.error(
+        `Lỗi khi cập nhật thumbnail cho video "${videoId}": [${status}] ${message}`,
+        error.stack,
+      );
+
+      throw new BadRequestException(`Lỗi YouTube API [${status}]: ${message}`);
+    } finally {
+      // 4. Dọn dẹp file upload tạm trên server
+      if (tempFilePathToDelete && fs.existsSync(tempFilePathToDelete)) {
+        try {
+          fs.unlinkSync(tempFilePathToDelete);
+        } catch (cleanupError: any) {
+          this.scheduleLogger.warn(`Không thể xóa file tạm ${tempFilePathToDelete}: ${cleanupError.message}`);
+        }
+      }
+    }
   }
 }
