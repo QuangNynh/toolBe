@@ -32,6 +32,7 @@ import { ScheduleYoutubeDto } from './dto/schedule-youtube.dto';
 import { YoutubeAuthCallbackDto } from './dto/youtube-auth.dto';
 import { GetChannelVideosApiDto } from './dto/get-channel-videos-api.dto';
 import { UploadThumbnailDto } from './dto/upload-thumbnail.dto';
+import { UpdateMetadataYoutubeDto } from './dto/update-metadata-youtube.dto';
 import { YoutubeService } from './youtube.service';
 
 @ApiTags('Youtube')
@@ -342,6 +343,22 @@ export class YoutubeController {
   })
   async scheduleVideo(@Body() dto: ScheduleYoutubeDto) {
     return this.ytService.scheduleVideo(dto);
+  }
+
+  @Post('/update-metadata')
+  @ApiOperation({
+    summary: 'Cập nhật thông tin chi tiết (metadata) của video YouTube bao gồm tiêu đề, mô tả, tags, và chế độ AI',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Cập nhật metadata video thành công',
+  })
+  @ApiResponse({
+    status: 400,
+    description: 'Lỗi validate hoặc YouTube API trả lỗi',
+  })
+  async updateMetadata(@Body() dto: UpdateMetadataYoutubeDto) {
+    return this.ytService.updateMetadata(dto);
   }
 
   @Post('/thumbnail')

@@ -2,14 +2,10 @@ import { ApiProperty } from '@nestjs/swagger';
 import {
   IsNotEmpty,
   IsString,
-  IsOptional,
-  IsArray,
   IsISO8601,
-  MaxLength,
+  Validate,
   ValidatorConstraint,
   ValidatorConstraintInterface,
-  Validate,
-  IsBoolean,
 } from 'class-validator';
 
 // ────────────────────────────────────────────────────────────
@@ -35,9 +31,6 @@ class IsFuturePublishTimeConstraint implements ValidatorConstraintInterface {
 export class ScheduleYoutubeDto {
   /**
    * Channel ID của kênh YouTube đã kết nối trong hệ thống.
-   *
-   * BE sẽ tự lookup refresh token từ file JSON dựa trên channelId này,
-   * giống mô hình Pinterest — client không cần biết/gửi token.
    */
   @ApiProperty({
     description:
@@ -58,36 +51,6 @@ export class ScheduleYoutubeDto {
   videoId: string;
 
   @ApiProperty({
-    description: 'Tiêu đề mới cho video (tối đa 100 ký tự)',
-    example: '10 Mẹo Hay Cho Cuộc Sống | Life Hacks',
-    maxLength: 100,
-  })
-  @IsString()
-  @IsNotEmpty()
-  @MaxLength(100)
-  title: string;
-
-  @ApiProperty({
-    description: 'Mô tả mới cho video (tối đa 5000 ký tự)',
-    example: 'Trong video này mình chia sẻ 10 mẹo hay...',
-    maxLength: 5000,
-  })
-  @IsString()
-  @IsNotEmpty()
-  @MaxLength(5000)
-  description: string;
-
-  @ApiProperty({
-    description: 'Danh sách tags cho video',
-    example: ['mẹo hay', 'life hacks', 'cuộc sống'],
-    required: false,
-  })
-  @IsOptional()
-  @IsArray()
-  @IsString({ each: true })
-  tags?: string[];
-
-  @ApiProperty({
     description:
       'Thời điểm video tự động chuyển sang Public (ISO 8601, ít nhất 15 phút trong tương lai)',
     example: '2026-08-01T14:30:00.000Z',
@@ -99,13 +62,4 @@ export class ScheduleYoutubeDto {
   @IsNotEmpty()
   @Validate(IsFuturePublishTimeConstraint)
   publishTime: string;
-
-  @ApiProperty({
-    description: 'Cho biết video có chứa nội dung do AI tạo ra',
-    example: false,
-    required: false,
-  })
-  @IsOptional()
-  @IsBoolean()
-  containsSyntheticMedia?: boolean;
 }

@@ -17,7 +17,8 @@
    - [Lấy tất cả video của kênh đã liên kết](#51-lấy-tất-cả-video-của-kênh-đã-liên-kết)
 2. [Lên lịch đăng video (Schedule)](#lên-lịch-đăng-video-schedule)
    - [Hẹn giờ công chiếu video](#6-hẹn-giờ-công-chiếu-video)
-   - [Cập nhật ảnh Thumbnail cho Video](#61-cập-nhật-ảnh-thumbnail-cho-video)
+   - [Cập nhật thông tin chi tiết (Metadata) cho Video](#61-cập-nhật-thông-tin-chi-tiết-metadata-cho-video)
+   - [Cập nhật ảnh Thumbnail cho Video](#62-cập-nhật-ảnh-thumbnail-cho-video)
 3. [Công cụ Tiện ích YouTube (Download & Transcript)](#công-cụ-tiện-ích-youtube-download--transcript)
    - [Lấy transcript của 1 video](#7-lấy-transcript-của-1-video)
    - [Lấy transcript của nhiều video (Batch)](#8-lấy-transcript-của-nhiều-video-batch)
@@ -281,9 +282,6 @@ POST /api/v1/youtube/schedule
 | :--- | :--- | :--- | :--- | :--- |
 | `channelId` | `string` | **Có** | Kênh phải tồn tại trong database JSON | ID kênh YouTube đã kết nối |
 | `videoId` | `string` | **Có** | Không được để trống | ID video đã được upload lên kênh dưới dạng Private |
-| `title` | `string` | **Có** | Tối đa 100 ký tự | Tiêu đề mới của video |
-| `description` | `string` | **Có** | Tối đa 5000 ký tự | Mô tả nội dung video |
-| `tags` | `array` | Không | Mảng các string | Danh sách từ khóa/thẻ tag của video |
 | `publishTime` | `string` | **Có** | Định dạng ISO 8601, cách hiện tại ít nhất **15 phút** | Thời điểm tự động Public video |
 
 **Ví dụ Body:**
@@ -291,9 +289,6 @@ POST /api/v1/youtube/schedule
 {
   "channelId": "UCxxxxxxxxxxxxxxxxxxxxxxx",
   "videoId": "dQw4w9WgXcQ",
-  "title": "Hướng Dẫn Nấu Ăn Ngon Tại Nhà",
-  "description": "Trong video này mình sẽ hướng dẫn các bạn cách làm món...",
-  "tags": ["nấu ăn", "học nấu ăn", "ẩm thực"],
   "publishTime": "2026-08-01T14:30:00.000Z"
 }
 ```
@@ -301,15 +296,13 @@ POST /api/v1/youtube/schedule
 #### Cách hoạt động:
 1. Backend kiểm tra kênh `channelId` đã liên kết chưa. Nếu chưa -> Lỗi `404`.
 2. Backend lấy `refreshToken` của kênh đó, khởi tạo client Google Auth và tự động làm mới `accessToken` nếu cần.
-3. Gọi API của Google: `youtube.videos.update` để cập nhật `snippet` (tiêu đề, mô tả, tags) và thiết lập `status.privacyStatus = "private"` cùng `status.publishAt = publishTime`.
-4. YouTube API sẽ tự động đổi trạng thái video sang **Public** đúng vào thời điểm `publishTime`.
+3. Gọi API của Google: `youtube.videos.update` để thiết lập `status.privacyStatus = "private"` cùng `status.publishAt = publishTime`. Không cần cập nhật snippet nên hoàn toàn tránh được các lỗi về Category ID.
 
 #### Response (200)
 ```json
 {
   "success": true,
   "videoId": "dQw4w9WgXcQ",
-  "title": "Hướng Dẫn Nấu Ăn Ngon Tại Nhà",
   "channelId": "UCxxxxxxxxxxxxxxxxxxxxxxx",
   "channelTitle": "Tên Kênh YouTube Của Tôi",
   "publishAt": "2026-08-01T14:30:00.000Z",
@@ -319,7 +312,56 @@ POST /api/v1/youtube/schedule
 
 ---
 
-### 6.1. Cập nhật ảnh Thumbnail cho Video
+### 6.1. Cập nhật thông tin chi tiết (Metadata) cho Video
+
+Cập nhật thông tin chi tiết của video bao gồm tiêu đề, mô tả, tags và cấu hình dán nhãn nội dung AI (Synthetic Media).
+
+#### Request
+```http
+POST /api/v1/youtube/update-metadata
+```
+**Headers:**
+- `Content-Type: application/json`
+
+**Body:**
+| Trường | Kiểu dữ liệu | Bắt buộc | Mô tả |
+| :--- | :--- | :--- | :--- |
+| `channelId` | `string` | **Có** | ID kênh YouTube đã kết nối |
+| `videoId` | `string` | **Có** | ID video cần cập nhật thông tin |
+| `title` | `string` | **Có** | Tiêu đề mới của video (Tối đa 100 ký tự) |
+| `description` | `string` | **Có** | Mô tả mới của video (Tối đa 5000 ký tự) |
+| `tags` | `array` | Không | Mảng các string làm tags từ khóa cho video |
+| `containsSyntheticMedia` | `boolean` | Không | Cho biết video có chứa nội dung do AI tạo ra (Altered or synthetic content) |
+
+**Ví dụ Body:**
+```json
+{
+  "channelId": "UCxxxxxxxxxxxxxxxxxxxxxxx",
+  "videoId": "dQw4w9WgXcQ",
+  "title": "10 Mẹo Hay Cho Cuộc Sống | Life Hacks",
+  "description": "Trong video này mình chia sẻ 10 mẹo hay...",
+  "tags": ["mẹo hay", "life hacks"],
+  "containsSyntheticMedia": true
+}
+```
+
+#### Response (200)
+```json
+{
+  "success": true,
+  "videoId": "dQw4w9WgXcQ",
+  "title": "10 Mẹo Hay Cho Cuộc Sống | Life Hacks",
+  "description": "Trong video này mình chia sẻ 10 mẹo hay...",
+  "tags": ["mẹo hay", "life hacks"],
+  "channelId": "UCxxxxxxxxxxxxxxxxxxxxxxx",
+  "channelTitle": "Tên Kênh YouTube Của Tôi",
+  "hasAlteredOrSyntheticContent": true
+}
+```
+
+---
+
+### 6.2. Cập nhật ảnh Thumbnail cho Video
 
 Cập nhật ảnh đại diện (Thumbnail) cho video YouTube bằng file upload trực tiếp từ client.
 

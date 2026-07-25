@@ -24,6 +24,7 @@ import { google } from 'googleapis';
 import { ScheduleYoutubeDto } from './dto/schedule-youtube.dto';
 import { GetChannelVideosApiDto } from './dto/get-channel-videos-api.dto';
 import { UploadThumbnailDto } from './dto/upload-thumbnail.dto';
+import { UpdateMetadataYoutubeDto } from './dto/update-metadata-youtube.dto';
 import SrtParser2 from 'srt-parser-2';
 
 export interface YouTubeChannel {
@@ -1024,12 +1025,15 @@ export class YoutubeService implements OnModuleInit {
     const scopes = [
       'https://www.googleapis.com/auth/youtube.force-ssl',
       'https://www.googleapis.com/auth/youtube.readonly',
+      'https://www.googleapis.com/auth/youtube',
+      'https://www.googleapis.com/auth/youtubepartner',
+      'https://www.googleapis.com/auth/youtubepartner-channel-audit',
     ];
 
     const url = oauth2Client.generateAuthUrl({
       access_type: 'offline',
+      prompt: 'select_account consent',
       scope: scopes,
-      prompt: 'consent', // Luôn yêu cầu consent để nhận refresh_token mới
     });
 
     return url;
@@ -1348,6 +1352,10 @@ export class YoutubeService implements OnModuleInit {
    * YouTube sẽ tự động chuyển video sang "public" khi đến thời điểm publishAt.
    * Điều kiện: video phải đang ở trạng thái "private" (không phải "unlisted").
    */
+  /**
+   * Lên lịch tự động public một video YouTube đang ở trạng thái Private.
+   * Chỉ cập nhật publishTime, không cập nhật snippet nên không cần lấy categoryId.
+   */
   async scheduleVideo(dto: ScheduleYoutubeDto) {
     // Lấy refresh token từ storage (tự auto-refresh nếu sắp hết hạn)
     const refreshToken = await this.getRefreshTokenForChannel(dto.channelId);
@@ -1363,34 +1371,14 @@ export class YoutubeService implements OnModuleInit {
     );
 
     try {
-      // 1. Lấy thông tin video hiện tại để lấy categoryId gốc của nó
-      const videoInfo = await youtube.videos.list({
-        part: ['snippet'],
-        id: [dto.videoId],
-      });
-
-      const currentVideo = videoInfo.data.items?.[0];
-      if (!currentVideo) {
-        throw new NotFoundException(`Video "${dto.videoId}" not found on YouTube.`);
-      }
-
-      const categoryId = currentVideo.snippet?.categoryId || '22'; // 22 là category mặc định "People & Blogs" làm fallback
-
-      // 2. Thực hiện cập nhật thông tin và lên lịch video
+      // 1. Chỉ cập nhật trường status để thiết lập lịch công chiếu
       const response = await youtube.videos.update({
-        part: ['snippet', 'status'],
+        part: ['status'],
         requestBody: {
           id: dto.videoId,
-          snippet: {
-            title: dto.title,
-            description: dto.description,
-            tags: dto.tags,
-            categoryId: categoryId, // Truyền categoryId hiện tại để tránh lỗi API
-          },
           status: {
             privacyStatus: 'private',
             publishAt: dto.publishTime,
-            containsSyntheticMedia: dto.containsSyntheticMedia,
           },
         },
       });
@@ -1398,15 +1386,12 @@ export class YoutubeService implements OnModuleInit {
       const video = response.data;
 
       this.scheduleLogger.log(
-        `Video "${dto.videoId}" scheduled successfully. ` +
-          `Title: "${video.snippet?.title}", ` +
-          `Publish at: ${video.status?.publishAt}`,
+        `Video "${dto.videoId}" scheduled successfully. Publish at: ${video.status?.publishAt}`,
       );
 
       return {
         success: true,
         videoId: video.id,
-        title: video.snippet?.title,
         channelId: video.snippet?.channelId,
         channelTitle: video.snippet?.channelTitle,
         publishAt: video.status?.publishAt,
@@ -1421,6 +1406,98 @@ export class YoutubeService implements OnModuleInit {
 
       this.scheduleLogger.error(
         `Failed to schedule video "${dto.videoId}": [${status}] ${message}`,
+        error.stack,
+      );
+
+      throw new BadRequestException(
+        `YouTube API error [${status}]: ${message}`,
+      );
+    }
+  }
+
+  /**
+   * Cập nhật thông tin chi tiết (metadata) của video bao gồm: title, description, tags, containsSyntheticMedia.
+   * Do cập nhật snippet nên bắt buộc phải lấy categoryId hiện tại để tránh lỗi Google API.
+   */
+  async updateMetadata(dto: UpdateMetadataYoutubeDto) {
+    // Lấy refresh token từ storage (tự auto-refresh nếu sắp hết hạn)
+    const refreshToken = await this.getRefreshTokenForChannel(dto.channelId);
+
+    // Khởi tạo OAuth2 client với refresh token từ storage
+    const oauth2Client = this.createOAuth2Client();
+    oauth2Client.setCredentials({ refresh_token: refreshToken });
+
+    const youtube = google.youtube({ version: 'v3', auth: oauth2Client });
+
+    this.scheduleLogger.log(
+      `Updating metadata for video "${dto.videoId}" on channel "${dto.channelId}"`,
+    );
+
+    try {
+      // 1. Lấy thông tin video hiện tại để lấy categoryId
+      const videoInfo = await youtube.videos.list({
+        part: ['snippet'],
+        id: [dto.videoId],
+      });
+
+      const currentVideo = videoInfo.data.items?.[0];
+      if (!currentVideo) {
+        throw new NotFoundException(`Video "${dto.videoId}" not found on YouTube.`);
+      }
+
+      const categoryId = currentVideo.snippet?.categoryId || '22'; // 22 làm fallback
+
+      // Xây dựng request payload động
+      const part = ['snippet'];
+      const requestBody: any = {
+        id: dto.videoId,
+        snippet: {
+          title: dto.title,
+          description: dto.description,
+          tags: dto.tags,
+          categoryId: categoryId, // Truyền categoryId bắt buộc khi update snippet
+        },
+      };
+
+      // Chỉ gửi status nếu client truyền cấu hình containsSyntheticMedia (AI content)
+      if (dto.containsSyntheticMedia !== undefined) {
+        part.push('status');
+        requestBody.status = {
+          hasAlteredOrSyntheticContent: dto.containsSyntheticMedia,
+        };
+      }
+
+      // 2. Thực hiện cập nhật
+      const response = await youtube.videos.update({
+        part,
+        requestBody,
+      });
+
+      const video = response.data;
+
+      this.scheduleLogger.log(
+        `Metadata for video "${dto.videoId}" updated successfully. Title: "${video.snippet?.title}"`,
+      );
+
+      return {
+        success: true,
+        videoId: video.id,
+        title: video.snippet?.title,
+        description: video.snippet?.description,
+        tags: video.snippet?.tags,
+        channelId: video.snippet?.channelId,
+        channelTitle: video.snippet?.channelTitle,
+        hasAlteredOrSyntheticContent: (video.status as any)?.hasAlteredOrSyntheticContent || null,
+      };
+    } catch (error: any) {
+      const status = error.response?.status || error.code;
+      const message =
+        error.response?.data?.error?.message ||
+        error.errors?.[0]?.message ||
+        error.message;
+
+      this.scheduleLogger.error(
+        `Failed to update metadata for video "${dto.videoId}": [${status}] ${message}`,
         error.stack,
       );
 
@@ -1460,28 +1537,73 @@ export class YoutubeService implements OnModuleInit {
         throw new BadRequestException(`Could not retrieve uploads playlist for channel ${dto.channelId}.`);
       }
 
-      // 2. Lấy danh sách video sơ bộ từ playlist uploads
-      const playlistResponse = await youtube.playlistItems.list({
+      // 2. Lấy danh sách video sơ bộ từ playlist uploads (Hỗ trợ maxResults lên tới 100)
+      const targetMaxResults = dto.maxResults || 10;
+      const items: any[] = [];
+      let nextPageToken = dto.pageToken || undefined;
+      let prevPageToken: string | null = null;
+      let pageInfo = { totalResults: 0, resultsPerPage: 0 };
+
+      // Lần fetch 1 (tối đa 50 phần tử do giới hạn của YouTube API)
+      const firstMaxResults = Math.min(targetMaxResults, 50);
+      const playlistResponse1 = await youtube.playlistItems.list({
         part: ['snippet', 'status', 'contentDetails'],
         playlistId: uploadsPlaylistId,
-        maxResults: dto.maxResults || 10,
-        pageToken: dto.pageToken,
+        maxResults: firstMaxResults,
+        pageToken: nextPageToken,
       });
 
-      const items = playlistResponse.data.items || [];
+      if (playlistResponse1.data.items) {
+        items.push(...playlistResponse1.data.items);
+      }
+      pageInfo = {
+        totalResults: playlistResponse1.data.pageInfo?.totalResults || 0,
+        resultsPerPage: playlistResponse1.data.pageInfo?.resultsPerPage || 0,
+      };
+      nextPageToken = playlistResponse1.data.nextPageToken || undefined;
+      prevPageToken = playlistResponse1.data.prevPageToken || null;
+
+      // Lần fetch 2 (nếu client yêu cầu > 50 và vẫn còn trang tiếp theo)
+      if (targetMaxResults > 50 && nextPageToken && items.length === 50) {
+        const secondMaxResults = Math.min(targetMaxResults - 50, 50);
+        const playlistResponse2 = await youtube.playlistItems.list({
+          part: ['snippet', 'status', 'contentDetails'],
+          playlistId: uploadsPlaylistId,
+          maxResults: secondMaxResults,
+          pageToken: nextPageToken,
+        });
+
+        if (playlistResponse2.data.items) {
+          items.push(...playlistResponse2.data.items);
+        }
+        nextPageToken = playlistResponse2.data.nextPageToken || undefined;
+      }
+
       const videoIds = items.map((item) => item.contentDetails?.videoId).filter(Boolean) as string[];
 
       // 3. Gọi thêm Videos.list để lấy thông tin chi tiết trạng thái lên lịch (publishAt)
       let detailedVideosMap = new Map<string, any>();
       if (videoIds.length > 0) {
         try {
-          const videosResponse = await youtube.videos.list({
-            part: ['status', 'liveStreamingDetails', 'snippet'],
-            id: videoIds,
-          });
-          const detailedItems = videosResponse.data.items || [];
-          detailedItems.forEach((v) => {
-            if (v.id) detailedVideosMap.set(v.id, v);
+          // Chia nhỏ thành các chunk tối đa 50 IDs (vì youtube.videos.list giới hạn tối đa 50)
+          const chunks: string[][] = [];
+          for (let i = 0; i < videoIds.length; i += 50) {
+            chunks.push(videoIds.slice(i, i + 50));
+          }
+
+          const detailRequests = chunks.map((chunk) =>
+            youtube.videos.list({
+              part: ['status', 'liveStreamingDetails', 'snippet'],
+              id: chunk,
+            }),
+          );
+
+          const detailResponses = await Promise.all(detailRequests);
+          detailResponses.forEach((res) => {
+            const detailedItems = res.data.items || [];
+            detailedItems.forEach((v) => {
+              if (v.id) detailedVideosMap.set(v.id, v);
+            });
           });
         } catch (err) {
           this.scheduleLogger.warn(`Failed to fetch detailed video status: ${err.message}`);
@@ -1536,10 +1658,10 @@ export class YoutubeService implements OnModuleInit {
       return {
         success: true,
         channelId: dto.channelId,
-        totalResults: playlistResponse.data.pageInfo?.totalResults || 0,
-        resultsPerPage: playlistResponse.data.pageInfo?.resultsPerPage || 0,
-        nextPageToken: playlistResponse.data.nextPageToken || null,
-        prevPageToken: playlistResponse.data.prevPageToken || null,
+        totalResults: pageInfo.totalResults,
+        resultsPerPage: items.length,
+        nextPageToken: nextPageToken || null,
+        prevPageToken: prevPageToken || null,
         videos,
       };
     } catch (error: any) {

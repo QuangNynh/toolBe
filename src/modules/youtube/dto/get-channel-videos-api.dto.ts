@@ -12,7 +12,7 @@ export class GetChannelVideosApiDto {
   channelId: string;
 
   @ApiProperty({
-    description: 'Số lượng kết quả tối đa trên mỗi trang (mặc định: 10, tối đa: 50)',
+    description: 'Số lượng kết quả tối đa trên mỗi trang (mặc định: 10, tối đa: 100)',
     example: 10,
     required: false,
   })
@@ -20,7 +20,7 @@ export class GetChannelVideosApiDto {
   @Type(() => Number)
   @IsInt()
   @Min(1)
-  @Max(50)
+  @Max(100)
   maxResults?: number = 10;
 
   @ApiProperty({
