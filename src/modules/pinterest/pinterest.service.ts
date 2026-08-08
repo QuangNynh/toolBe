@@ -287,12 +287,12 @@ export class PinterestService {
 
     return {
       id: pin.id ?? null,
-      title: pin.title || null,
-      description: pin.description || null,
+      title: pin.title || pin.grid_title || null,
+      description: pin.description || pin.raw_description || pin.seo_description || null,
       type: isVideo ? 'video' : 'image',
       is_video: isVideo,
       pin_url: `https://www.pinterest.com/pin/${pin.id}/`,
-      link: pin.link || null,
+      link: pin.link || pin.link_url || pin.destination_url || pin.rich_metadata?.url || null,
       domain: pin.domain || null,
       created_at: pin.created_at || null,
       takenAt: timestamp,
@@ -681,8 +681,11 @@ export class PinterestService {
 
     worksheet.columns = [
       { header: 'STT', key: 'stt', width: 8 },
-      { header: 'Link', key: 'link', width: 50 },
+      { header: 'Link Pin', key: 'pin_url', width: 45 },
+      { header: 'Link đính kèm', key: 'link', width: 50 },
       { header: 'Type', key: 'type', width: 10 },
+      { header: 'Tiêu đề', key: 'title', width: 30 },
+      { header: 'Mô tả', key: 'description', width: 40 },
       { header: 'Likes', key: 'likes', width: 12 },
       { header: 'Saves', key: 'saves', width: 12 },
       { header: 'Repins', key: 'repins', width: 12 },
@@ -708,8 +711,11 @@ export class PinterestService {
 
       worksheet.addRow({
         stt: index + 1,
-        link: item.pin_url || '',
+        pin_url: item.pin_url || '',
+        link: item.link || '',
         type: item.type || '',
+        title: item.title || '',
+        description: item.description || '',
         likes: item.like_count || 0,
         saves: item.save_count || 0,
         repins: item.repin_count || 0,
