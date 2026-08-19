@@ -23,6 +23,7 @@
    - [Lấy transcript của 1 video](#7-lấy-transcript-của-1-video)
    - [Lấy transcript của nhiều video (Batch)](#8-lấy-transcript-của-nhiều-video-batch)
    - [Tải âm thanh (Stream Audio) từ video](#9-tải-âm-thanh-stream-audio-từ-video)
+   - [Tải / Stream Audio YouTube bằng youtubei.js](#91-tải--stream-audio-youtube-bằng-thư-viện-youtubeijs)
    - [Tải video chất lượng cao](#10-tải-video-chất-lượng-cao)
    - [Lấy danh sách video từ URL kênh](#11-lấy-danh-sách-video-từ-url-kênh)
    - [Tải xuống ảnh từ URL bất kỳ](#12-tải-xuống-ảnh-từ-url-bất-kỳ)
@@ -474,9 +475,9 @@ POST /api/v1/youtube/transcripts
 
 ---
 
-### 9. Tải âm thanh (Stream Audio) từ video
+### 9. Tải âm thanh (Stream Audio MP3) từ video
 
-Tải âm thanh của video YouTube dưới định dạng `.m4a` (hoặc `.mp3` nếu không có M4A gốc). File được stream trực tiếp về máy Client.
+Tải âm thanh của video YouTube dưới định dạng chuẩn `.mp3` (192kbps high quality). File được chuyển đổi và stream trực tiếp về máy Client.
 
 #### Request
 ```http
@@ -490,7 +491,36 @@ POST /api/v1/youtube/audio
 ```
 
 #### Response (200)
-Trả về file binary dạng `audio/mp4` hoặc `audio/mpeg` cùng với header `Content-Disposition: attachment; filename="..."`. Browser sẽ tự động tải xuống.
+Trả về file audio chuẩn dạng `audio/mpeg` (`.mp3`) cùng với header `Content-Disposition: attachment; filename="..."`. Browser sẽ tự động tải xuống.
+
+---
+
+### 9.1. Tải / Stream Audio YouTube bằng thư viện `youtubei.js`
+
+Tải hoặc stream âm thanh từ video YouTube sử dụng thư viện `youtubei.js` (hoặc tự động dự phòng qua engine tải tối ưu), xuất ra file `.mp3` chuẩn chất lượng cao (hoặc `.m4a` nếu chỉ định).
+
+#### Request
+```http
+POST /api/v1/youtube/audio/youtubei
+```
+**Body:**
+```json
+{
+  "url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+  "format": "mp3"
+}
+```
+*Ghi chú các tham số Body:*
+- `url` (bắt buộc): Đường link YouTube đầy đủ hoặc Video ID.
+- `format` (tùy chọn): Định dạng audio mong muốn, nhận `'mp3'` (mặc định - chuẩn MP3 192kbps) hoặc `'m4a'` (luồng gốc AAC/M4A).
+
+#### Response (200)
+Trả về luồng file binary dạng `audio/mpeg` (cho `.mp3`) hoặc `audio/mp4` (cho `.m4a`) kèm theo header tải xuống:
+```http
+Content-Type: audio/mpeg
+Content-Disposition: attachment; filename="Never_Gonna_Give_You_Up.mp3"
+Accept-Ranges: bytes
+```
 
 ---
 

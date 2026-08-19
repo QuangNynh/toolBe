@@ -58,7 +58,7 @@ export class YoutubeController {
   }
 
   @Post('/audio')
-  @ApiOperation({ summary: 'Stream audio từ video YouTube' })
+  @ApiOperation({ summary: 'Stream audio từ video YouTube (sử dụng yt-dlp)' })
   @ApiResponse({
     status: 200,
     description: 'Audio stream của video',
@@ -68,6 +68,22 @@ export class YoutubeController {
     @Res({ passthrough: false }) res: Response,
   ) {
     return this.ytService.streamAudio(dto.url, res);
+  }
+
+  @Post('/audio/youtubei')
+  @ApiOperation({
+    summary: 'Tải / Stream audio YouTube bằng thư viện youtubei.js',
+    description: 'Trích xuất luồng audio trực tiếp từ YouTube thông qua thư viện youtubei.js (tốc độ cao, stream trực tiếp không cần lưu đĩa hoặc chuyển đổi sang MP3)',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Audio stream (file M4A hoặc MP3) từ YouTube',
+  })
+  async downloadAudioYoutubei(
+    @Body() dto: StreamAudioDto,
+    @Res({ passthrough: false }) res: Response,
+  ) {
+    return this.ytService.downloadAudioYoutubei(dto.url, res, dto.format || 'mp3');
   }
 
   @Post('/video')

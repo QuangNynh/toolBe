@@ -17,7 +17,7 @@ import * as sharp from 'sharp';
 import { promisify } from 'util';
 import { exec as youtubeDlExec } from 'youtube-dl-exec';
 import { fetchTranscript } from 'youtube-transcript-plus';
-import { Innertube } from 'youtubei.js';
+import { Innertube, ClientType } from 'youtubei.js';
 import type VideoInfo from 'youtubei.js/dist/src/parser/youtube/VideoInfo';
 import { ProxyService } from '../proxy/proxy.service';
 import { google } from 'googleapis';
@@ -42,6 +42,7 @@ const execPromise = promisify(exec);
 @Injectable()
 export class YoutubeService implements OnModuleInit {
   private youtube: Innertube;
+  private youtubeIos: Innertube;
   private proxyAgent: any;
   private readonly channelsFilePath = path.join(process.cwd(), 'data', 'youtube', 'channels.json');
 
@@ -90,6 +91,11 @@ export class YoutubeService implements OnModuleInit {
     };
 
     this.youtube = await Innertube.create();
+    try {
+      this.youtubeIos = await Innertube.create({ client_type: ClientType.IOS });
+    } catch {
+      // Fallback if iOS client fails to init
+    }
     this.proxyAgent = this.proxyService.getProxyAgent();
   }
 
@@ -266,12 +272,20 @@ export class YoutubeService implements OnModuleInit {
     let lastError: any = null;
     const maxAttempts = 3;
 
+    // Strategies with JS challenge solver & player clients to prevent HTTP 403 Forbidden
+    const clientStrategies = [
+      '--remote-components ejs:github --extractor-args "youtube:player_client=web,web_embedded"',
+      '--remote-components ejs:github --extractor-args "youtube:player_client=web,mweb,web_creator,web_embedded"',
+      '--remote-components ejs:github',
+    ];
+
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       const ytdlpProxy = this.proxyService.getYtdlpProxy();
       const proxyArg = ytdlpProxy ? `--proxy "${ytdlpProxy}"` : '';
       const mergeArg = options.mergeOutputFormat ? `--merge-output-format ${options.mergeOutputFormat}` : '';
+      const extraArgs = clientStrategies[attempt - 1] || clientStrategies[0];
       
-      const cmd = `yt-dlp --buffer-size 1024K --http-chunk-size 10M -f "${formatString}" ${mergeArg} -o "${rawFile}" --no-check-certificates --no-warnings ${proxyArg} "${url}"`;
+      const cmd = `yt-dlp --buffer-size 1024K --http-chunk-size 10M ${extraArgs} -f "${formatString}" ${mergeArg} -o "${rawFile}" --no-check-certificates --no-warnings ${proxyArg} "${url}"`;
       
       try {
         console.log(`Executing (Attempt ${attempt}/${maxAttempts}): ${cmd}`);
@@ -356,14 +370,14 @@ export class YoutubeService implements OnModuleInit {
         videoId = parts[parts.length - 1] || '';
       }
 
-      let filename = 'audio.m4a';
+      let filename = 'audio.mp3';
       if (videoId) {
         try {
           const info = await this.youtube.getInfo(videoId);
           const sanitizedTitle = this.sanitizeFilename(
             info.basic_info.title || 'audio',
           );
-          filename = `${sanitizedTitle}.m4a`;
+          filename = `${sanitizedTitle}.mp3`;
         } catch {
           // If can't get info, use default filename
         }
@@ -375,7 +389,7 @@ export class YoutubeService implements OnModuleInit {
 
       console.log(`Downloading audio to disk: ${url}`);
 
-      await this.runYtdlpWithRetry('bestaudio[ext=m4a]/bestaudio/best', rawFile, url);
+      await this.runYtdlpWithRetry('bestaudio/best', rawFile, url);
 
       // Find the actual downloaded file
       const files = fs.readdirSync(tempDir);
@@ -386,48 +400,40 @@ export class YoutubeService implements OnModuleInit {
       const downloadedFilePath = path.join(tempDir, downloadedFile);
       rawFile = downloadedFilePath; // Update rawFile path for cleanup
 
-      const isM4a = downloadedFile.endsWith('.m4a');
-      
-      if (isM4a) {
-        console.log(`Audio is already in M4A format, streaming directly without transcoding...`);
-        finalFile = downloadedFilePath;
-        rawFile = null; // Set to null so cleanup doesn't delete it before streaming finishes
-      } else {
-        console.log(`Audio is in non-M4A format (${downloadedFile.split('.').pop()}), transcoding to MP3...`);
-        finalFile = path.join(tempDir, `${baseName}-final.mp3`);
-        filename = filename.replace(/\.m4a$/, '.mp3'); // Fallback filename to .mp3
+      console.log(`Converting audio (${downloadedFile.split('.').pop()}) to MP3 192kbps...`);
+      finalFile = path.join(tempDir, `${baseName}-final.mp3`);
 
-        await new Promise<void>((resolve, reject) => {
-          Ffmpeg(downloadedFilePath)
-            .audioCodec('libmp3lame')
-            .audioBitrate(128)
-            .save(finalFile as string)
-            .on('end', () => resolve())
-            .on('error', (err: Error) => reject(err));
-        });
+      await new Promise<void>((resolve, reject) => {
+        Ffmpeg(downloadedFilePath)
+          .audioCodec('libmp3lame')
+          .audioBitrate(192)
+          .save(finalFile as string)
+          .on('end', () => resolve())
+          .on('error', (err: Error) => reject(err));
+      });
 
-        // Delete raw file
-        try {
-          fs.unlinkSync(downloadedFilePath);
-        } catch {
-          // Ignore
-        }
-        rawFile = null;
+      // Delete raw file
+      try {
+        fs.unlinkSync(downloadedFilePath);
+      } catch {
+        // Ignore
       }
+      rawFile = null;
 
       if (!fs.existsSync(finalFile)) {
-        throw new BadRequestException('Audio file does not exist');
+        throw new BadRequestException('Converted MP3 audio file does not exist');
       }
 
       const stat = fs.statSync(finalFile);
       const fileSize = stat.size;
 
-      res.setHeader('Content-Type', isM4a ? 'audio/mp4' : 'audio/mpeg');
+      res.setHeader('Content-Type', 'audio/mpeg');
       res.setHeader('Content-Length', fileSize.toString());
       res.setHeader(
         'Content-Disposition',
-        `attachment; filename="${filename}"`,
+        `attachment; filename="${encodeURIComponent(filename)}"`,
       );
+      res.setHeader('Accept-Ranges', 'bytes');
 
       const stream = fs.createReadStream(finalFile);
       stream.pipe(res);
@@ -454,6 +460,213 @@ export class YoutubeService implements OnModuleInit {
       }
       if (!res.headersSent) {
         res.status(500).send(`Error downloading audio: ${error.message}`);
+      }
+    }
+  }
+
+  /**
+   * Tải hoặc Stream audio từ video YouTube bằng thư viện youtubei.js (tốc độ cao, stream trực tiếp không cần lưu đĩa)
+   */
+  async downloadAudioYoutubei(
+    url: string,
+    res: Response,
+    formatType: 'mp3' | 'm4a' = 'mp3',
+  ) {
+    let rawFile: string | null = null;
+    let finalFile: string | null = null;
+
+    try {
+      // 1. Extract video ID
+      let videoId: string = url.trim();
+      if (videoId.includes('v=')) {
+        videoId = videoId.split('v=')[1].split('&')[0];
+      } else if (videoId.includes('youtu.be/')) {
+        videoId = videoId.split('youtu.be/')[1].split('?')[0];
+      } else if (videoId.includes('/shorts/')) {
+        videoId = videoId.split('/shorts/')[1].split('?')[0];
+      }
+
+      if (!videoId) {
+        throw new BadRequestException('Invalid YouTube URL or video ID');
+      }
+
+      // 2. Fetch video info via youtubei.js
+      if (!this.youtubeIos) {
+        try {
+          this.youtubeIos = await Innertube.create({ client_type: ClientType.IOS });
+        } catch {
+          // ignore
+        }
+      }
+
+      let info: VideoInfo | any = null;
+      let title = 'audio';
+
+      if (this.youtubeIos) {
+        try {
+          info = await this.youtubeIos.getBasicInfo(videoId);
+          title = info?.basic_info?.title || 'audio';
+        } catch {
+          // fallback
+        }
+      }
+
+      if (!info && this.youtube) {
+        info = await this.youtube.getBasicInfo(videoId);
+        title = info?.basic_info?.title || 'audio';
+      }
+
+      if (!info) {
+        throw new BadRequestException('Could not fetch video information from YouTube');
+      }
+
+      const sanitizedTitle = this.sanitizeFilename(title) || 'audio';
+      const filename = `${sanitizedTitle}.${formatType}`;
+
+      // 3. Extract best audio format
+      const adaptiveFormats = info?.streaming_data?.adaptive_formats || [];
+      const audioFormats = adaptiveFormats
+        .filter((f: any) => (f.has_audio && !f.has_video) || f.mime_type?.startsWith('audio/'))
+        .sort((a: any, b: any) => (b.bitrate || 0) - (a.bitrate || 0));
+
+      const bestFormat: any = audioFormats.find((f: any) => f.url) || audioFormats[0];
+      let streamUrl: string | null = bestFormat?.url || null;
+
+      if (!streamUrl && bestFormat?.decipher && this.youtube?.session?.player) {
+        try {
+          streamUrl = await bestFormat.decipher(this.youtube.session.player);
+        } catch {
+          // ignore decipher error
+        }
+      }
+
+      // 4. Stream handling
+      if (formatType === 'm4a' && streamUrl) {
+        console.log(`[youtubei.js] Direct streaming M4A audio: ${sanitizedTitle}`);
+        const response = await axios({
+          method: 'GET',
+          url: streamUrl,
+          responseType: 'stream',
+          headers: {
+            'User-Agent': 'com.google.ios.youtube/20.11.6 (iPhone10,4; U; CPU iOS 16_7_7 like Mac OS X)',
+          },
+          httpsAgent: this.proxyAgent || undefined,
+        });
+
+        const contentLength = response.headers['content-length'] || bestFormat?.content_length;
+        res.setHeader('Content-Type', 'audio/mp4');
+        if (contentLength) {
+          res.setHeader('Content-Length', contentLength.toString());
+        }
+        res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(filename)}"`);
+        res.setHeader('Accept-Ranges', 'bytes');
+
+        response.data.pipe(res);
+
+        response.data.on('error', (err: any) => {
+          console.error('[youtubei.js] Stream piping error:', err);
+          if (!res.headersSent) {
+            res.status(500).send('Error streaming audio');
+          }
+        });
+        return;
+      }
+
+      // 5. If MP3 format or direct streaming was not possible, download & process with ffmpeg
+      console.log(`[youtubei.js] Processing audio to ${formatType} for: ${sanitizedTitle}`);
+      const tempDir = os.tmpdir();
+      const baseName = `yt-i-${Date.now()}`;
+      rawFile = path.join(tempDir, `${baseName}-raw.m4a`);
+
+      if (streamUrl) {
+        const response = await axios({
+          method: 'GET',
+          url: streamUrl,
+          responseType: 'stream',
+          headers: {
+            'User-Agent': 'com.google.ios.youtube/20.11.6 (iPhone10,4; U; CPU iOS 16_7_7 like Mac OS X)',
+          },
+          httpsAgent: this.proxyAgent || undefined,
+        });
+
+        const fileOut = fs.createWriteStream(rawFile);
+        await new Promise<void>((resolve, reject) => {
+          response.data.pipe(fileOut);
+          fileOut.on('finish', () => resolve());
+          fileOut.on('error', reject);
+          response.data.on('error', reject);
+        });
+      } else {
+        const activeClient = this.youtubeIos || this.youtube;
+        const webStream = await activeClient.download(videoId, {
+          type: 'audio',
+          quality: 'best',
+        });
+        const nodeStream = Readable.fromWeb(webStream as any);
+        const fileOut = fs.createWriteStream(rawFile);
+        await new Promise<void>((resolve, reject) => {
+          nodeStream.pipe(fileOut);
+          fileOut.on('finish', () => resolve());
+          fileOut.on('error', reject);
+          nodeStream.on('error', reject);
+        });
+      }
+
+      if (!fs.existsSync(rawFile)) {
+        throw new BadRequestException('Failed to download audio file via youtubei.js');
+      }
+
+      if (formatType === 'mp3') {
+        finalFile = path.join(tempDir, `${baseName}-final.mp3`);
+        await new Promise<void>((resolve, reject) => {
+          Ffmpeg(rawFile as string)
+            .audioCodec('libmp3lame')
+            .audioBitrate(192)
+            .save(finalFile as string)
+            .on('end', () => resolve())
+            .on('error', (err: Error) => reject(err));
+        });
+
+        try { fs.unlinkSync(rawFile); } catch {}
+        rawFile = null;
+      } else {
+        finalFile = rawFile;
+        rawFile = null;
+      }
+
+      if (!finalFile || !fs.existsSync(finalFile)) {
+        throw new BadRequestException('Processed audio file not found');
+      }
+
+      const stat = fs.statSync(finalFile);
+      res.setHeader('Content-Type', formatType === 'mp3' ? 'audio/mpeg' : 'audio/mp4');
+      res.setHeader('Content-Length', stat.size.toString());
+      res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(filename)}"`);
+
+      const fileStream = fs.createReadStream(finalFile);
+      fileStream.pipe(res);
+
+      const targetFile = finalFile;
+      res.on('finish', () => {
+        fs.unlink(targetFile, () => {});
+      });
+      fileStream.on('error', () => {
+        fs.unlink(targetFile, () => {});
+      });
+
+    } catch (error: any) {
+      console.warn(
+        `[youtubei.js] Direct extraction failed (${error.message}), falling back to yt-dlp engine...`,
+      );
+      if (rawFile && fs.existsSync(rawFile)) {
+        try { fs.unlinkSync(rawFile); } catch {}
+      }
+      if (finalFile && fs.existsSync(finalFile)) {
+        try { fs.unlinkSync(finalFile); } catch {}
+      }
+
+      if (!res.headersSent) {
+        return this.streamAudio(url, res);
       }
     }
   }
