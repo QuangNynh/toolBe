@@ -256,6 +256,18 @@ export class YoutubeService implements OnModuleInit {
     return `video${suffix}.mp4`;
   }
 
+  private getCookiesArg(): string {
+    const cookiesBrowser = this.configService.get<string>('YTDLP_COOKIES_FROM_BROWSER');
+    if (cookiesBrowser) {
+      return `--cookies-from-browser "${cookiesBrowser}"`;
+    }
+    const cookiesFile = this.configService.get<string>('YTDLP_COOKIES_FILE');
+    if (cookiesFile) {
+      return `--cookies "${cookiesFile}"`;
+    }
+    return '';
+  }
+
   private async runYtdlpWithRetry(
     formatString: string,
     rawFile: string,
@@ -270,8 +282,9 @@ export class YoutubeService implements OnModuleInit {
       const ytdlpProxy = this.proxyService.getYtdlpProxy();
       const proxyArg = ytdlpProxy ? `--proxy "${ytdlpProxy}"` : '';
       const mergeArg = options.mergeOutputFormat ? `--merge-output-format ${options.mergeOutputFormat}` : '';
-      
-      const cmd = `yt-dlp --buffer-size 1024K --http-chunk-size 10M -f "${formatString}" ${mergeArg} -o "${rawFile}" --no-check-certificates --no-warnings ${proxyArg} "${url}"`;
+      const cookiesArg = this.getCookiesArg();
+
+      const cmd = `yt-dlp --buffer-size 1024K --http-chunk-size 10M -f "${formatString}" ${mergeArg} -o "${rawFile}" --no-check-certificates --no-warnings ${cookiesArg} ${proxyArg} "${url}"`;
       
       try {
         console.log(`Executing (Attempt ${attempt}/${maxAttempts}): ${cmd}`);
@@ -627,6 +640,16 @@ export class YoutubeService implements OnModuleInit {
       const ytdlpProxy = this.proxyService.getYtdlpProxy();
       if (ytdlpProxy) {
         ytDlOpts.proxy = ytdlpProxy;
+      }
+      // Thêm cookies để bypass 403
+      const cookiesBrowser = this.configService.get<string>('YTDLP_COOKIES_FROM_BROWSER');
+      if (cookiesBrowser) {
+        ytDlOpts.cookiesFromBrowser = cookiesBrowser;
+      } else {
+        const cookiesFile = this.configService.get<string>('YTDLP_COOKIES_FILE');
+        if (cookiesFile) {
+          ytDlOpts.cookies = cookiesFile;
+        }
       }
       const result = await youtubeDlExec(url, ytDlOpts);
 
