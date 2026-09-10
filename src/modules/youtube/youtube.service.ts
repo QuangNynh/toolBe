@@ -400,13 +400,19 @@ export class YoutubeService implements OnModuleInit {
       const downloadedFilePath = path.join(tempDir, downloadedFile);
       rawFile = downloadedFilePath; // Update rawFile path for cleanup
 
-      console.log(`Converting audio (${downloadedFile.split('.').pop()}) to MP3 192kbps...`);
+      console.log(`Converting audio (${downloadedFile.split('.').pop()}) to MP3 128kbps (fast)...`);
       finalFile = path.join(tempDir, `${baseName}-final.mp3`);
 
       await new Promise<void>((resolve, reject) => {
         Ffmpeg(downloadedFilePath)
           .audioCodec('libmp3lame')
-          .audioBitrate(192)
+          .audioBitrate(128)
+          .outputOptions([
+            '-vn',                  // bỏ video stream
+            '-threads 0',           // dùng tất cả CPU cores
+            '-compression_level 0', // encode nhanh nhất (libmp3lame)
+            '-map_metadata -1',     // bỏ metadata không cần
+          ])
           .save(finalFile as string)
           .on('end', () => resolve())
           .on('error', (err: Error) => reject(err));
@@ -621,7 +627,13 @@ export class YoutubeService implements OnModuleInit {
         await new Promise<void>((resolve, reject) => {
           Ffmpeg(rawFile as string)
             .audioCodec('libmp3lame')
-            .audioBitrate(192)
+            .audioBitrate(128)
+            .outputOptions([
+              '-vn',                  // bỏ video stream
+              '-threads 0',           // dùng tất cả CPU cores
+              '-compression_level 0', // encode nhanh nhất (libmp3lame)
+              '-map_metadata -1',     // bỏ metadata không cần
+            ])
             .save(finalFile as string)
             .on('end', () => resolve())
             .on('error', (err: Error) => reject(err));
