@@ -361,83 +361,76 @@ export class YoutubeService implements OnModuleInit {
     let rawFile: string | null = null;
     let finalFile: string | null = null;
     try {
-      // Extract video ID to get metadata
+      // Extract video ID to get title for filename
       let videoId: string;
       if (url.includes('v=')) {
         videoId = url.split('v=')[1].split('&')[0];
+      } else if (url.includes('youtu.be/')) {
+        videoId = url.split('youtu.be/')[1].split('?')[0];
+      } else if (url.includes('/shorts/')) {
+        videoId = url.split('/shorts/')[1].split('?')[0];
       } else {
         const parts = url.split('/');
         videoId = parts[parts.length - 1] || '';
       }
 
-      let filename = 'audio.mp3';
+      let filename = 'audio.m4a';
       if (videoId) {
         try {
-          const info = await this.youtube.getInfo(videoId);
+          const info = await this.youtube.getBasicInfo(videoId);
           const sanitizedTitle = this.sanitizeFilename(
             info.basic_info.title || 'audio',
           );
-          filename = `${sanitizedTitle}.mp3`;
+          filename = `${sanitizedTitle}.m4a`;
         } catch {
-          // If can't get info, use default filename
+          // fallback to default
         }
       }
 
       const tempDir = os.tmpdir();
       const baseName = `yt-audio-${Date.now()}`;
-      rawFile = path.join(tempDir, `${baseName}-raw.%(ext)s`);
+      // Download best audio (m4a/aac) — NO re-encode, copy stream = original quality
+      rawFile = path.join(tempDir, `${baseName}.%(ext)s`);
 
-      console.log(`Downloading audio to disk: ${url}`);
+      const ytdlpProxy = this.proxyService.getYtdlpProxy();
+      const proxyArg = ytdlpProxy ? `--proxy "${ytdlpProxy}"` : '';
+      const clientArgs = '--remote-components ejs:github --extractor-args "youtube:player_client=web,web_embedded"';
 
-      await this.runYtdlpWithRetry('bestaudio/best', rawFile, url);
+      // bestaudio[ext=m4a] → ưu tiên m4a/aac gốc, fallback bestaudio nếu không có
+      const cmd = `yt-dlp ${clientArgs} -f "bestaudio[ext=m4a]/bestaudio" --no-check-certificates --no-warnings ${proxyArg} -o "${rawFile}" "${url}"`;
 
-      // Find the actual downloaded file
+      console.log(`[streamAudio] Downloading M4A (original quality, no convert): ${url}`);
+      await execPromise(cmd);
+
+      // Tìm file vừa tải về
       const files = fs.readdirSync(tempDir);
-      const downloadedFile = files.find(f => f.startsWith(baseName));
-      if (!downloadedFile) {
-        throw new BadRequestException('Downloaded audio file does not exist');
+      const downloaded = files.find(f => f.startsWith(baseName));
+      if (!downloaded) {
+        throw new BadRequestException('Downloaded audio file not found');
       }
-      const downloadedFilePath = path.join(tempDir, downloadedFile);
-      rawFile = downloadedFilePath; // Update rawFile path for cleanup
 
-      console.log(`Converting audio (${downloadedFile.split('.').pop()}) to MP3 128kbps (fast)...`);
-      finalFile = path.join(tempDir, `${baseName}-final.mp3`);
+      finalFile = path.join(tempDir, downloaded);
+      const ext = path.extname(downloaded).slice(1) || 'm4a'; // m4a, webm, opus...
 
-      await new Promise<void>((resolve, reject) => {
-        Ffmpeg(downloadedFilePath)
-          .audioCodec('libmp3lame')
-          .audioBitrate(128)
-          .outputOptions([
-            '-vn',                  // bỏ video stream
-            '-threads 0',           // dùng tất cả CPU cores
-            '-compression_level 0', // encode nhanh nhất (libmp3lame)
-            '-map_metadata -1',     // bỏ metadata không cần
-          ])
-          .save(finalFile as string)
-          .on('end', () => resolve())
-          .on('error', (err: Error) => reject(err));
-      });
-
-      // Delete raw file
-      try {
-        fs.unlinkSync(downloadedFilePath);
-      } catch {
-        // Ignore
+      // Nếu không phải m4a (ví dụ webm/opus), remux sang m4a bằng ffmpeg -c copy (siêu nhanh, không re-encode)
+      if (ext !== 'm4a') {
+        const remuxed = path.join(tempDir, `${baseName}-remux.m4a`);
+        console.log(`[streamAudio] Remuxing ${ext} → m4a (stream copy, no re-encode)...`);
+        await execPromise(`ffmpeg -y -i "${finalFile}" -c copy "${remuxed}"`);
+        fs.unlinkSync(finalFile);
+        finalFile = remuxed;
       }
-      rawFile = null;
 
       if (!fs.existsSync(finalFile)) {
-        throw new BadRequestException('Converted MP3 audio file does not exist');
+        throw new BadRequestException('M4A file not found after processing');
       }
 
       const stat = fs.statSync(finalFile);
-      const fileSize = stat.size;
-
-      res.setHeader('Content-Type', 'audio/mpeg');
-      res.setHeader('Content-Length', fileSize.toString());
+      res.setHeader('Content-Type', 'audio/mp4');
+      res.setHeader('Content-Length', stat.size.toString());
       res.setHeader(
         'Content-Disposition',
-        `attachment; filename="${encodeURIComponent(filename)}"`,
+        `attachment; filename="audio.m4a"; filename*=UTF-8''${encodeURIComponent(filename)}`,
       );
       res.setHeader('Accept-Ranges', 'bytes');
 
@@ -450,7 +443,6 @@ export class YoutubeService implements OnModuleInit {
           if (err) console.error('Cleanup error:', err);
         });
       });
-
       stream.on('error', (error) => {
         console.error('Stream error:', error);
         fs.unlink(targetFile, () => {});
@@ -564,7 +556,7 @@ export class YoutubeService implements OnModuleInit {
         if (contentLength) {
           res.setHeader('Content-Length', contentLength.toString());
         }
-        res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(filename)}"`);
+        res.setHeader('Content-Disposition', `attachment; filename="audio.m4a"; filename*=UTF-8''${encodeURIComponent(filename)}`);
         res.setHeader('Accept-Ranges', 'bytes');
 
         response.data.pipe(res);
@@ -624,20 +616,10 @@ export class YoutubeService implements OnModuleInit {
 
       if (formatType === 'mp3') {
         finalFile = path.join(tempDir, `${baseName}-final.mp3`);
-        await new Promise<void>((resolve, reject) => {
-          Ffmpeg(rawFile as string)
-            .audioCodec('libmp3lame')
-            .audioBitrate(128)
-            .outputOptions([
-              '-vn',                  // bỏ video stream
-              '-threads 0',           // dùng tất cả CPU cores
-              '-compression_level 0', // encode nhanh nhất (libmp3lame)
-              '-map_metadata -1',     // bỏ metadata không cần
-            ])
-            .save(finalFile as string)
-            .on('end', () => resolve())
-            .on('error', (err: Error) => reject(err));
-        });
+        // -q:a 5 = VBR ~130kbps, fastest libmp3lame mode (~123x realtime)
+        await execPromise(
+          `ffmpeg -y -vn -i "${rawFile}" -c:a libmp3lame -q:a 5 -map_metadata -1 "${finalFile}"`,
+        );
 
         try { fs.unlinkSync(rawFile); } catch {}
         rawFile = null;
@@ -653,7 +635,7 @@ export class YoutubeService implements OnModuleInit {
       const stat = fs.statSync(finalFile);
       res.setHeader('Content-Type', formatType === 'mp3' ? 'audio/mpeg' : 'audio/mp4');
       res.setHeader('Content-Length', stat.size.toString());
-      res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(filename)}"`);
+      res.setHeader('Content-Disposition', `attachment; filename="audio.${formatType}"; filename*=UTF-8''${encodeURIComponent(filename)}`);
 
       const fileStream = fs.createReadStream(finalFile);
       fileStream.pipe(res);
