@@ -394,13 +394,47 @@ export class YoutubeService implements OnModuleInit {
 
       const ytdlpProxy = this.proxyService.getYtdlpProxy();
       const proxyArg = ytdlpProxy ? `--proxy "${ytdlpProxy}"` : '';
-      const clientArgs = '--remote-components ejs:github --extractor-args "youtube:player_client=web,web_embedded"';
 
-      // bestaudio[ext=m4a] → ưu tiên m4a/aac gốc, fallback bestaudio nếu không có
-      const cmd = `yt-dlp ${clientArgs} -f "bestaudio[ext=m4a]/bestaudio" --no-check-certificates --no-warnings ${proxyArg} -o "${rawFile}" "${url}"`;
+      // Retry strategies: từ đơn giản nhất → phức tạp hơn
+      // Không dùng --remote-components (không hoạt động trên Windows/một số môi trường)
+      const strategies = [
+        // Strategy 1: iOS client - thường trả m4a/aac trực tiếp, không cần JS solver
+        `--extractor-args "youtube:player_client=ios"`,
+        // Strategy 2: mweb client
+        `--extractor-args "youtube:player_client=mweb"`,
+        // Strategy 3: web + web_embedded fallback
+        `--extractor-args "youtube:player_client=web,web_embedded"`,
+        // Strategy 4: không có extractor-args - để yt-dlp tự chọn
+        ``,
+      ];
 
-      console.log(`[streamAudio] Downloading M4A (original quality, no convert): ${url}`);
-      await execPromise(cmd);
+      // Format: ưu tiên m4a (aac gốc), fallback sang bất kỳ audio tốt nhất
+      const formatStr = 'bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio';
+
+      let lastError: any = null;
+      let succeeded = false;
+
+      for (const strategyArgs of strategies) {
+        const cmd = `yt-dlp ${strategyArgs} -f "${formatStr}" --no-check-certificates --no-warnings ${proxyArg} -o "${rawFile}" "${url}"`;
+        console.log(`[streamAudio] Trying: yt-dlp ${strategyArgs || '(no extra args)'}`);
+        try {
+          await execPromise(cmd);
+          succeeded = true;
+          break;
+        } catch (err: any) {
+          lastError = err;
+          console.warn(`[streamAudio] Strategy failed: ${err.message?.split('\n')[0]}`);
+          // Dọn file partial nếu có
+          try {
+            const partials = fs.readdirSync(tempDir).filter(f => f.startsWith(baseName));
+            for (const f of partials) fs.unlinkSync(path.join(tempDir, f));
+          } catch { /* ignore */ }
+        }
+      }
+
+      if (!succeeded) {
+        throw lastError || new Error('All download strategies failed');
+      }
 
       // Tìm file vừa tải về
       const files = fs.readdirSync(tempDir);
